@@ -1,17 +1,53 @@
 """
 Staff Duty Attendance System - with 10‑second confirmation timer
+Database path auto-detects writable location.
 """
 
 import sqlite3
 import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
+import os
+import sys
 
-DB_NAME = "attendance.db"
+# ---------- Determine a writable database path ----------
+def get_db_path():
+    """Return a writable path for attendance.db."""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # Running as script
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # First try to use the executable's directory
+    db_path = os.path.join(base_dir, "attendance.db")
+    # Check if we can write there
+    try:
+        test_file = os.path.join(base_dir, "write_test.tmp")
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        # If we reach here, directory is writable
+        return db_path
+    except (OSError, PermissionError):
+        # Fallback to user's AppData directory (Windows) or ~/.local (Linux/macOS)
+        if os.name == 'nt':  # Windows
+            appdata = os.getenv('APPDATA')
+            if not appdata:
+                appdata = os.path.expanduser('~/AppData/Roaming')
+            db_dir = os.path.join(appdata, 'AttendanceSystem')
+        else:  # macOS/Linux
+            db_dir = os.path.expanduser('~/.local/share/AttendanceSystem')
+        if not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+        return os.path.join(db_dir, "attendance.db")
+
+DB_PATH = get_db_path()
 
 # ---------- Database Setup ----------
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS staff (
@@ -34,9 +70,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ---------- Database Helpers ----------
+# ---------- Database Helpers (all use DB_PATH) ----------
 def get_staff(staff_id):
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT staff_id, name, batch FROM staff WHERE staff_id=?", (staff_id,))
     row = c.fetchone()
@@ -45,7 +81,7 @@ def get_staff(staff_id):
 
 def get_today_attendance(staff_id):
     today = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT checkin, checkout FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
     row = c.fetchone()
@@ -54,7 +90,7 @@ def get_today_attendance(staff_id):
 
 def set_checkin(staff_id, time_str):
     today = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout)
@@ -65,7 +101,7 @@ def set_checkin(staff_id, time_str):
 
 def set_checkout(staff_id, time_str):
     today = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         UPDATE attendance SET checkout=?
@@ -75,9 +111,8 @@ def set_checkout(staff_id, time_str):
     conn.close()
 
 def override_checkin(staff_id, time_str):
-    """Reset today's record: new checkin, clear checkout"""
     today = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         UPDATE attendance SET checkin=?, checkout=NULL
@@ -92,7 +127,7 @@ def get_monthly_summary(year, month):
         end_date = f"{year+1}-01-01"
     else:
         end_date = f"{year}-{month+1:02d}-01"
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         SELECT s.staff_id, s.name, s.batch,
@@ -115,7 +150,7 @@ def get_daily_details(staff_id, year, month):
         end_date = f"{year+1}-01-01"
     else:
         end_date = f"{year}-{month+1:02d}-01"
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
         SELECT date, checkin, checkout,
@@ -129,19 +164,17 @@ def get_daily_details(staff_id, year, month):
     conn.close()
     return rows
 
-# ---------- GUI Application ----------
+# ---------- GUI Application (unchanged except DB_PATH) ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Staff Attendance System")
         self.root.geometry("600x500")
 
-        # Pending confirmation dialog control
         self.confirm_dialog = None
         self.timer_id = None
         self.countdown = 10
 
-        # Current staff info (for display)
         self.current_staff_id = None
         self.current_name = None
         self.current_batch = None
@@ -151,7 +184,6 @@ class AttendanceApp:
         self.update_status()
 
     def create_widgets(self):
-        # Top frame: barcode input
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
         top_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -163,7 +195,6 @@ class AttendanceApp:
         self.scan_btn = ttk.Button(top_frame, text="Process Scan", command=self.on_barcode_scan)
         self.scan_btn.grid(row=0, column=2, padx=5, pady=5)
 
-        # Staff info display
         info_frame = ttk.LabelFrame(self.root, text="Staff Info", padding=10)
         info_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -178,7 +209,6 @@ class AttendanceApp:
         ttk.Label(info_frame, text="Status:").grid(row=2, column=0, sticky=tk.W, padx=5)
         ttk.Label(info_frame, textvariable=self.status_var).grid(row=2, column=1, sticky=tk.W, padx=5)
 
-        # Buttons for staff management and reports
         btn_frame = ttk.Frame(self.root)
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -186,7 +216,6 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Monthly Summary", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
-        # Log area
         log_frame = ttk.LabelFrame(self.root, text="Recent Activity", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
@@ -200,7 +229,6 @@ class AttendanceApp:
         self.log_text.config(state=tk.DISABLED)
 
     def update_status(self, staff_id=None):
-        """Update the displayed staff info and status."""
         if staff_id:
             self.current_staff_id = staff_id
             staff = get_staff(staff_id)
@@ -233,10 +261,8 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- Barcode Scan with Confirmation ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
-            # A confirmation dialog is already open – ignore new scans
             self.log_message("Scan ignored – confirmation pending")
             self.barcode_entry.delete(0, tk.END)
             return
@@ -246,7 +272,6 @@ class AttendanceApp:
             return
         self.barcode_entry.delete(0, tk.END)
 
-        # Look up staff
         staff = get_staff(barcode)
         if not staff:
             if messagebox.askyesno("Staff Not Found", f"Staff ID '{barcode}' not found.\nDo you want to add this staff now?"):
@@ -260,46 +285,37 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        # Determine current attendance status and propose action
         att = get_today_attendance(staff_id)
         now = datetime.datetime.now().strftime("%H:%M:%S")
         if att:
             checkin_time = att[0]
             checkout_time = att[1]
             if checkout_time:
-                # Already checked out today – propose "Check-in (override)"
                 action = "Check-in (override)"
                 action_key = "override"
             else:
-                # Checked in, no checkout – propose "Check-out"
                 action = "Check-out"
                 action_key = "checkout"
         else:
-            # No record – propose "Check-in"
             action = "Check-in"
             action_key = "checkin"
 
-        # Show confirmation dialog with countdown
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
-        """Create a modal dialog with a 10‑second countdown and Confirm/Cancel buttons."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
         dialog.geometry("400x280")
         dialog.transient(self.root)
-        dialog.grab_set()          # modal
+        dialog.grab_set()
         dialog.focus_force()
 
-        # Disable main barcode entry
         self.barcode_entry.config(state=tk.DISABLED)
         self.scan_btn.config(state=tk.DISABLED)
 
-        # Store reference
         self.confirm_dialog = dialog
         self.countdown = 10
 
-        # Display staff info
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
         ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
 
@@ -312,11 +328,9 @@ class AttendanceApp:
         ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=5, sticky=tk.W)
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
 
-        # Countdown label
         self.countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {self.countdown} seconds", font=("Arial", 10))
         self.countdown_label.grid(row=4, column=0, columnspan=2, pady=10)
 
-        # Buttons
         btn_frame = ttk.Frame(dialog)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
 
@@ -339,16 +353,11 @@ class AttendanceApp:
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
         cancel_btn.pack(side=tk.LEFT, padx=10)
 
-        # Start countdown
         self.update_countdown(dialog, staff_id, action_key, current_time)
-
-        # Bind close event to cancel (if user clicks X)
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
     def update_countdown(self, dialog, staff_id, action_key, current_time):
-        """Decrement countdown and auto‑confirm when reaches 0."""
         if self.countdown <= 0:
-            # Auto‑confirm
             self.perform_action(staff_id, action_key, current_time)
             dialog.destroy()
             return
@@ -358,7 +367,6 @@ class AttendanceApp:
         self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time)
 
     def perform_action(self, staff_id, action_key, time_str):
-        """Execute the actual check‑in/out/override after confirmation."""
         if action_key == "checkin":
             set_checkin(staff_id, time_str)
             self.log_message(f"Checked in at {time_str}")
@@ -372,9 +380,7 @@ class AttendanceApp:
             self.log_message("Unknown action – nothing stored")
             return
 
-        # Update main window status
         self.update_status(staff_id)
-        # Re‑enable barcode entry
         self.barcode_entry.config(state=tk.NORMAL)
         self.scan_btn.config(state=tk.NORMAL)
         self.confirm_dialog = None
@@ -382,12 +388,11 @@ class AttendanceApp:
             self.root.after_cancel(self.timer_id)
             self.timer_id = None
 
-    # ---------- Staff Management ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
             batch = simpledialog.askstring("Add Staff", "Enter batch (optional):", parent=self.root)
-            conn = sqlite3.connect(DB_NAME)
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             try:
                 c.execute("INSERT INTO staff (staff_id, name, batch) VALUES (?, ?, ?)",
@@ -412,7 +417,7 @@ class AttendanceApp:
         def refresh_staff_list():
             for row in tree.get_children():
                 tree.delete(row)
-            conn = sqlite3.connect(DB_NAME)
+            conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("SELECT staff_id, name, batch FROM staff ORDER BY name")
             for r in c.fetchall():
@@ -433,7 +438,7 @@ class AttendanceApp:
                 name = simpledialog.askstring("Add Staff", "Enter name:", parent=win)
                 if name:
                     batch = simpledialog.askstring("Add Staff", "Enter batch:", parent=win)
-                    conn = sqlite3.connect(DB_NAME)
+                    conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
                     c.execute("INSERT INTO staff (staff_id, name, batch) VALUES (?, ?, ?)",
                               (staff_id, name, batch))
@@ -453,7 +458,7 @@ class AttendanceApp:
             new_name = simpledialog.askstring("Edit Staff", "New name:", initialvalue=name, parent=win)
             if new_name:
                 new_batch = simpledialog.askstring("Edit Staff", "New batch:", initialvalue=batch, parent=win)
-                conn = sqlite3.connect(DB_NAME)
+                conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute("UPDATE staff SET name=?, batch=? WHERE staff_id=?", (new_name, new_batch, staff_id))
                 conn.commit()
@@ -468,7 +473,7 @@ class AttendanceApp:
             values = tree.item(selected[0])['values']
             staff_id = values[0]
             if messagebox.askyesno("Delete", f"Delete staff '{values[1]}' and all attendance records?"):
-                conn = sqlite3.connect(DB_NAME)
+                conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute("DELETE FROM attendance WHERE staff_id=?", (staff_id,))
                 c.execute("DELETE FROM staff WHERE staff_id=?", (staff_id,))
@@ -481,14 +486,12 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
-    # ---------- Monthly Summary ----------
     def show_monthly_summary(self):
         win = tk.Toplevel(self.root)
         win.title("Monthly Summary")
         win.geometry("400x200")
 
         ttk.Label(win, text="Select Month:").pack(pady=10)
-        # Use simple entry for year-month
         ttk.Label(win, text="Enter year and month (YYYY-MM):").pack()
         entry = ttk.Entry(win)
         entry.pack(pady=5)
