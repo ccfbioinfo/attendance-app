@@ -1,47 +1,76 @@
 """
-Staff Duty Attendance System - with 10‑second confirmation timer
-Database path auto-detects writable location.
+Staff Duty Attendance System
+- Barcode scan with 10s confirmation
+- Import attendance logs (CSV/Excel)
+- Import roster (Excel matrix with Chinese dates and shift codes)
+- Monthly exception report based on individual schedules
 """
 
 import sqlite3
 import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import os
 import sys
+import csv
+import re
 
-# ---------- Determine a writable database path ----------
+try:
+    from openpyxl import load_workbook
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
+# ---------- Configuration ----------
+WORK_START = "09:00:00"
+WORK_END   = "18:00:00"
+CURRENT_YEAR = datetime.date.today().year
+
+# ---------- Shift Code Mapping ----------
+SHIFT_MAP = {
+    "MD":   ("08:00", "16:48"),
+    "D8":   ("08:00", "16:48"),
+    "R8":   ("08:00", "16:48"),
+    "D/SD": ("09:00", "17:48"),
+    "R10":  ("10:00", "18:48"),
+    "P":    ("13:00", "21:48"),
+    "N":    ("21:30", "08:30"),
+    "W":    ("08:30", "17:18"),
+    "AA1":  ("09:00", "18:00"),
+    "AA2":  ("09:00", "17:00"),
+    "D4":   ("08:00", "16:48"),
+    "D1":   ("08:00", "16:48"),   # 新增
+    "D3":   ("08:00", "16:48"),
+    "D5":   ("08:00", "16:48"),
+    "D6":   ("08:00", "16:48"),
+    "MD1":  ("08:00", "16:48"),
+    "MD2":  ("08:00", "16:48"),
+    "MD3":  ("08:00", "16:48"),
+    "MD4":  ("08:00", "16:48"),
+    "MD5":  ("08:00", "16:48"),
+    "SD":   ("09:00", "17:48"),
+    "PH":   ("09:00", "17:48"),   # Public holiday?
+    "Ag/gP": ("13:00", "21:48"),   # 近似 P
+    "Ag2/gP2": ("13:00", "21:48"),
+    "O":    None,
+    "AL":   None,
+    "SL":   None,
+    "AM AL/ PM SL": None,
+    "D/ PM NPL": None,
+    "AA2/ PM SL": None,
+}
+
+# ---------- Persistent Database Path ----------
 def get_db_path():
-    """Return a writable path for attendance.db."""
-    if getattr(sys, 'frozen', False):
-        # Running as compiled executable
-        base_dir = os.path.dirname(sys.executable)
+    if os.name == 'nt':
+        appdata = os.getenv('APPDATA')
+        if not appdata:
+            appdata = os.path.expanduser('~/AppData/Roaming')
+        db_dir = os.path.join(appdata, 'AttendanceSystem')
     else:
-        # Running as script
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # First try to use the executable's directory
-    db_path = os.path.join(base_dir, "attendance.db")
-    # Check if we can write there
-    try:
-        test_file = os.path.join(base_dir, "write_test.tmp")
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
-        # If we reach here, directory is writable
-        return db_path
-    except (OSError, PermissionError):
-        # Fallback to user's AppData directory (Windows) or ~/.local (Linux/macOS)
-        if os.name == 'nt':  # Windows
-            appdata = os.getenv('APPDATA')
-            if not appdata:
-                appdata = os.path.expanduser('~/AppData/Roaming')
-            db_dir = os.path.join(appdata, 'AttendanceSystem')
-        else:  # macOS/Linux
-            db_dir = os.path.expanduser('~/.local/share/AttendanceSystem')
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-        return os.path.join(db_dir, "attendance.db")
+        db_dir = os.path.expanduser('~/.local/share/AttendanceSystem')
+    os.makedirs(db_dir, exist_ok=True)
+    return os.path.join(db_dir, 'attendance.db')
 
 DB_PATH = get_db_path()
 
@@ -67,10 +96,22 @@ def init_db():
             UNIQUE(staff_id, date)
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS work_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            work_start TEXT NOT NULL,
+            work_end TEXT NOT NULL,
+            FOREIGN KEY (staff_id) REFERENCES staff(staff_id),
+            UNIQUE(staff_id, start_date, end_date)
+        )
+    ''')
     conn.commit()
     conn.close()
 
-# ---------- Database Helpers (all use DB_PATH) ----------
+# ---------- Database Helpers ----------
 def get_staff(staff_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -78,6 +119,14 @@ def get_staff(staff_id):
     row = c.fetchone()
     conn.close()
     return row
+
+def get_staff_by_name(name):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT staff_id FROM staff WHERE name=?", (name,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 def get_today_attendance(staff_id):
     today = datetime.date.today().isoformat()
@@ -121,7 +170,40 @@ def override_checkin(staff_id, time_str):
     conn.commit()
     conn.close()
 
-def get_monthly_summary(year, month):
+def upsert_attendance(staff_id, date_str, checkin, checkout):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout)
+        VALUES (?, ?, ?, ?)
+    ''', (staff_id, date_str, checkin, checkout))
+    conn.commit()
+    conn.close()
+
+def upsert_work_schedule(staff_id, start_date, end_date, work_start, work_end):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO work_schedule (staff_id, start_date, end_date, work_start, work_end)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (staff_id, start_date, end_date, work_start, work_end))
+    conn.commit()
+    conn.close()
+
+def get_work_schedule_for_date(staff_id, date_str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT work_start, work_end
+        FROM work_schedule
+        WHERE staff_id = ? AND ? BETWEEN start_date AND end_date
+        ORDER BY start_date DESC LIMIT 1
+    ''', (staff_id, date_str))
+    row = c.fetchone()
+    conn.close()
+    return row if row else None
+
+def get_monthly_attendance(year, month):
     start_date = f"{year}-{month:02d}-01"
     if month == 12:
         end_date = f"{year+1}-01-01"
@@ -130,58 +212,39 @@ def get_monthly_summary(year, month):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
-        SELECT s.staff_id, s.name, s.batch,
-               SUM(strftime('%s', a.checkout) - strftime('%s', a.checkin)) AS total_sec,
-               COUNT(a.id) AS days_worked
+        SELECT s.staff_id, s.name, s.batch, a.date, a.checkin, a.checkout
         FROM attendance a
         JOIN staff s ON a.staff_id = s.staff_id
         WHERE a.date >= ? AND a.date < ?
           AND a.checkin IS NOT NULL AND a.checkout IS NOT NULL
-        GROUP BY s.staff_id
-        ORDER BY s.name
+        ORDER BY s.staff_id, a.date
     ''', (start_date, end_date))
     rows = c.fetchall()
     conn.close()
     return rows
 
-def get_daily_details(staff_id, year, month):
-    start_date = f"{year}-{month:02d}-01"
-    if month == 12:
-        end_date = f"{year+1}-01-01"
-    else:
-        end_date = f"{year}-{month+1:02d}-01"
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        SELECT date, checkin, checkout,
-               (strftime('%s', checkout) - strftime('%s', checkin)) / 3600.0 AS hours
-        FROM attendance
-        WHERE staff_id=? AND date >= ? AND date < ?
-          AND checkin IS NOT NULL AND checkout IS NOT NULL
-        ORDER BY date
-    ''', (staff_id, start_date, end_date))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-# ---------- GUI Application (unchanged except DB_PATH) ----------
+# ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Staff Attendance System")
-        self.root.geometry("600x500")
-
+        self.root.geometry("650x500")
+        self.show_db_path()
         self.confirm_dialog = None
         self.timer_id = None
         self.countdown = 10
-
         self.current_staff_id = None
         self.current_name = None
         self.current_batch = None
-
         self.create_widgets()
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
+
+    def show_db_path(self):
+        messagebox.showinfo("Database Location",
+                            f"Attendance records stored at:\n{DB_PATH}\n\n"
+                            f"Default work hours: {WORK_START} - {WORK_END}\n"
+                            "Individual schedules can be imported from roster.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -213,7 +276,9 @@ class AttendanceApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Monthly Summary", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Import Attendance", command=self.import_attendance).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Import Roster (Excel)", command=self.import_roster).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
         log_frame = ttk.LabelFrame(self.root, text="Recent Activity", padding=10)
@@ -261,6 +326,193 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
+    # ---------- Import Attendance (unchanged) ----------
+    def import_attendance(self):
+        file_path = filedialog.askopenfilename(
+            title="Select attendance file",
+            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx *.xls")]
+        )
+        if not file_path:
+            return
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.csv':
+            self.import_attendance_csv(file_path)
+        elif ext in ('.xlsx', '.xls'):
+            self.import_attendance_excel(file_path)
+        else:
+            messagebox.showerror("Error", "Unsupported format.")
+
+    def import_attendance_csv(self, file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                count = 0
+                for row in reader:
+                    if len(row) < 4:
+                        continue
+                    staff_id, date_str, checkin, checkout = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
+                    try:
+                        datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        self.log_message(f"Skipping invalid date: {date_str}")
+                        continue
+                    if not get_staff(staff_id):
+                        self.log_message(f"Staff {staff_id} not found, skipping.")
+                        continue
+                    upsert_attendance(staff_id, date_str, checkin, checkout)
+                    count += 1
+                self.log_message(f"Imported {count} attendance records.")
+                messagebox.showinfo("Success", f"Imported {count} records.")
+        except Exception as e:
+            messagebox.showerror("Error", f"CSV import failed: {str(e)}")
+
+    def import_attendance_excel(self, file_path):
+        if not HAS_OPENPYXL:
+            messagebox.showerror("Error", "openpyxl not installed. Please install: pip install openpyxl")
+            return
+        try:
+            wb = load_workbook(file_path, data_only=True)
+            ws = wb.active
+            count = 0
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and len(row) >= 4:
+                    staff_id = str(row[0]).strip()
+                    date_str = str(row[1]).strip()
+                    checkin = str(row[2]).strip() if row[2] else None
+                    checkout = str(row[3]).strip() if row[3] else None
+                    if not staff_id or not date_str:
+                        continue
+                    try:
+                        datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        self.log_message(f"Skipping invalid date: {date_str}")
+                        continue
+                    if not get_staff(staff_id):
+                        self.log_message(f"Staff {staff_id} not found, skipping.")
+                        continue
+                    upsert_attendance(staff_id, date_str, checkin, checkout)
+                    count += 1
+            self.log_message(f"Imported {count} attendance records from Excel.")
+            messagebox.showinfo("Success", f"Imported {count} records.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Excel import failed: {str(e)}")
+
+    # ---------- Import Roster (updated for new format) ----------
+    def import_roster(self):
+        if not HAS_OPENPYXL:
+            messagebox.showerror("Error", "openpyxl is required for roster import. Please install: pip install openpyxl")
+            return
+
+        file_path = filedialog.askopenfilename(
+            title="Select roster Excel file",
+            filetypes=[("Excel files", "*.xlsx")]
+        )
+        if not file_path:
+            return
+
+        try:
+            wb = load_workbook(file_path, data_only=True)
+            ws = wb.active
+
+            # Step 1: Find the row that contains dates (like "21-6月" or "26/06/26")
+            date_row_idx = None
+            date_cols = []  # list of (col_idx, date_str_parsed)
+            for row_idx in range(1, min(15, ws.max_row + 1)):
+                row_values = [cell.value for cell in ws[row_idx]]
+                found = False
+                for col_idx, val in enumerate(row_values, start=1):
+                    if val and isinstance(val, str):
+                        parsed = self.parse_date(val)
+                        if parsed:
+                            date_cols.append((col_idx, parsed))
+                            found = True
+                if found:
+                    date_row_idx = row_idx
+                    break
+
+            if not date_cols:
+                messagebox.showerror("Error", "No date columns found in the first 15 rows.")
+                return
+
+            # Sort by column index
+            date_cols.sort(key=lambda x: x[0])
+            first_date_col = date_cols[0][0]
+
+            # Determine name column: assume it's immediately to the left of the first date column
+            name_col = first_date_col - 1
+            if name_col < 1:
+                messagebox.showerror("Error", "Name column not found (must be before date columns).")
+                return
+
+            self.log_message(f"Detected date row: {date_row_idx}, name column: {name_col}, first date col: {first_date_col}")
+
+            # Step 2: Iterate over rows below date row
+            inserted = 0
+            skipped = 0
+            for row_idx in range(date_row_idx + 1, ws.max_row + 1):
+                name_cell = ws.cell(row=row_idx, column=name_col)
+                name = str(name_cell.value).strip() if name_cell.value else None
+                if not name:
+                    continue
+
+                staff_id = get_staff_by_name(name)
+                if not staff_id:
+                    self.log_message(f"Staff '{name}' not found in database, skipping row {row_idx}")
+                    skipped += 1
+                    continue
+
+                for col_idx, date_str in date_cols:
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    shift_code = str(cell.value).strip() if cell.value else ""
+                    if not shift_code:
+                        continue
+                    if shift_code in SHIFT_MAP:
+                        times = SHIFT_MAP[shift_code]
+                        if times is None:
+                            continue  # off/leave
+                        work_start, work_end = times
+                        upsert_work_schedule(staff_id, date_str, date_str, work_start, work_end)
+                        inserted += 1
+                    else:
+                        self.log_message(f"Unknown shift code '{shift_code}' for {name} on {date_str}")
+
+            self.log_message(f"Roster import completed. Inserted {inserted} schedules, skipped {skipped} staff rows.")
+            messagebox.showinfo("Import Complete", f"Imported {inserted} work schedules from roster.\nSkipped {skipped} rows due to missing staff.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Roster import failed: {str(e)}")
+
+    def parse_date(self, date_str):
+        """Parse date strings in formats: '21-6月' or '26/06/26' -> YYYY-MM-DD"""
+        s = date_str.strip()
+        # Try Chinese format: DD-M月
+        match = re.match(r'^(\d{1,2})-(\d{1,2})月$', s)
+        if match:
+            day = int(match.group(1))
+            month = int(match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                try:
+                    dt = datetime.date(CURRENT_YEAR, month, day)
+                    return dt.isoformat()
+                except ValueError:
+                    return None
+        # Try format: DD/MM/YY  (e.g., 26/06/26)
+        match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', s)
+        if match:
+            day = int(match.group(1))
+            month = int(match.group(2))
+            year_short = int(match.group(3))
+            year = 2000 + year_short if year_short < 100 else year_short
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                try:
+                    dt = datetime.date(year, month, day)
+                    return dt.isoformat()
+                except ValueError:
+                    return None
+        return None
+
+    # ---------- Barcode Scan (unchanged) ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -388,6 +640,7 @@ class AttendanceApp:
             self.root.after_cancel(self.timer_id)
             self.timer_id = None
 
+    # ---------- Staff Management ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
@@ -486,9 +739,10 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
+    # ---------- Monthly Exception Report ----------
     def show_monthly_summary(self):
         win = tk.Toplevel(self.root)
-        win.title("Monthly Summary")
+        win.title("Monthly Exception Report")
         win.geometry("400x200")
 
         ttk.Label(win, text="Select Month:").pack(pady=10)
@@ -504,73 +758,85 @@ class AttendanceApp:
             except:
                 messagebox.showerror("Error", "Invalid date format. Use YYYY-MM")
                 return
-            rows = get_monthly_summary(year, month)
-            if not rows:
+
+            all_records = get_monthly_attendance(year, month)
+            if not all_records:
                 messagebox.showinfo("No Data", "No attendance records for this month.")
                 return
 
-            sum_win = tk.Toplevel(win)
-            sum_win.title(f"Summary for {year}-{month:02d}")
-            sum_win.geometry("700x400")
+            exceptions = {}
+            for row in all_records:
+                staff_id, name, batch, date_str, checkin_str, checkout_str = row
+                schedule = get_work_schedule_for_date(staff_id, date_str)
+                if schedule:
+                    work_start_str, work_end_str = schedule
+                else:
+                    work_start_str, work_end_str = WORK_START, WORK_END
+                try:
+                    checkin_time = datetime.datetime.strptime(checkin_str, "%H:%M:%S").time()
+                    checkout_time = datetime.datetime.strptime(checkout_str, "%H:%M:%S").time()
+                    work_start = datetime.datetime.strptime(work_start_str, "%H:%M:%S").time()
+                    work_end = datetime.datetime.strptime(work_end_str, "%H:%M:%S").time()
+                except ValueError:
+                    continue
 
-            tree = ttk.Treeview(sum_win, columns=("ID", "Name", "Batch", "Total Hours", "Days Worked"), show="headings")
-            tree.heading("ID", text="Staff ID")
-            tree.heading("Name", text="Name")
+                issues = []
+                if checkin_time > work_start:
+                    issues.append(("Late", checkin_str))
+                if checkout_time < work_end:
+                    issues.append(("Early Leave", checkout_str))
+
+                if issues:
+                    if staff_id not in exceptions:
+                        exceptions[staff_id] = {'name': name, 'batch': batch, 'days': []}
+                    for issue_type, time_val in issues:
+                        exceptions[staff_id]['days'].append((date_str, issue_type, time_val))
+
+            if not exceptions:
+                messagebox.showinfo("All Good", "No late arrivals or early departures for this month.")
+                return
+
+            result_win = tk.Toplevel(win)
+            result_win.title(f"Exception Report - {year}-{month:02d}")
+            result_win.geometry("800x500")
+
+            tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Time"), show="headings")
+            tree.heading("Staff", text="Staff (ID)")
             tree.heading("Batch", text="Batch")
-            tree.heading("Total Hours", text="Total Hours")
-            tree.heading("Days Worked", text="Days Worked")
+            tree.heading("Date", text="Date")
+            tree.heading("Issue", text="Issue Type")
+            tree.heading("Time", text="Recorded Time")
             tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-            for row in rows:
-                staff_id, name, batch, total_sec, days = row
-                hours = total_sec / 3600.0 if total_sec else 0
-                tree.insert("", tk.END, values=(staff_id, name, batch, f"{hours:.2f}", days))
+            for staff_id, data in exceptions.items():
+                for date_str, issue_type, time_val in data['days']:
+                    tree.insert("", tk.END, values=(
+                        f"{data['name']} ({staff_id})",
+                        data['batch'] or "-",
+                        date_str,
+                        issue_type,
+                        time_val
+                    ))
 
-            def show_details(event):
-                selected = tree.selection()
-                if not selected:
-                    return
-                values = tree.item(selected[0])['values']
-                staff_id = values[0]
-                details = get_daily_details(staff_id, year, month)
-                if not details:
-                    return
-                detail_win = tk.Toplevel(sum_win)
-                detail_win.title(f"Daily details for {values[1]}")
-                detail_win.geometry("500x300")
-                dtree = ttk.Treeview(detail_win, columns=("Date", "Checkin", "Checkout", "Hours"), show="headings")
-                dtree.heading("Date", text="Date")
-                dtree.heading("Checkin", text="Checkin")
-                dtree.heading("Checkout", text="Checkout")
-                dtree.heading("Hours", text="Hours")
-                dtree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-                for d in details:
-                    date, checkin, checkout, hours = d
-                    dtree.insert("", tk.END, values=(date, checkin, checkout, f"{hours:.2f}"))
-                ttk.Button(detail_win, text="Close", command=detail_win.destroy).pack(pady=5)
-
-            tree.bind("<Double-1>", show_details)
-
-            def export_csv():
+            def export_exceptions():
                 import csv
-                from tkinter import filedialog
                 file_path = filedialog.asksaveasfilename(defaultextension=".csv",
                                                          filetypes=[("CSV files", "*.csv")])
                 if not file_path:
                     return
                 with open(file_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Staff ID", "Name", "Batch", "Total Hours", "Days Worked"])
-                    for row in rows:
-                        staff_id, name, batch, total_sec, days = row
-                        hours = total_sec / 3600.0 if total_sec else 0
-                        writer.writerow([staff_id, name, batch, f"{hours:.2f}", days])
-                messagebox.showinfo("Export", f"Summary exported to {file_path}")
+                    writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Recorded Time"])
+                    for staff_id, data in exceptions.items():
+                        for date_str, issue_type, time_val in data['days']:
+                            writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue_type, time_val])
+                messagebox.showinfo("Export", f"Report exported to {file_path}")
 
-            ttk.Button(sum_win, text="Export CSV", command=export_csv).pack(pady=5)
+            ttk.Button(result_win, text="Export CSV", command=export_exceptions).pack(pady=5)
 
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
+
 
 # ---------- Main ----------
 if __name__ == "__main__":
