@@ -1,9 +1,5 @@
 """
-Staff Duty Attendance System
-- Barcode scan with 10s confirmation
-- Import attendance logs (CSV/Excel)
-- Import roster (Excel matrix with Chinese dates and shift codes)
-- Monthly exception report based on individual schedules
+Staff Duty Attendance System - Fixed DB location and cancel bug
 """
 
 import sqlite3
@@ -39,7 +35,7 @@ SHIFT_MAP = {
     "AA1":  ("09:00", "18:00"),
     "AA2":  ("09:00", "17:00"),
     "D4":   ("08:00", "16:48"),
-    "D1":   ("08:00", "16:48"),   # 新增
+    "D1":   ("08:00", "16:48"),
     "D3":   ("08:00", "16:48"),
     "D5":   ("08:00", "16:48"),
     "D6":   ("08:00", "16:48"),
@@ -49,8 +45,8 @@ SHIFT_MAP = {
     "MD4":  ("08:00", "16:48"),
     "MD5":  ("08:00", "16:48"),
     "SD":   ("09:00", "17:48"),
-    "PH":   ("09:00", "17:48"),   # Public holiday?
-    "Ag/gP": ("13:00", "21:48"),   # 近似 P
+    "PH":   ("09:00", "17:48"),
+    "Ag/gP": ("13:00", "21:48"),
     "Ag2/gP2": ("13:00", "21:48"),
     "O":    None,
     "AL":   None,
@@ -60,17 +56,17 @@ SHIFT_MAP = {
     "AA2/ PM SL": None,
 }
 
-# ---------- Persistent Database Path ----------
+# ---------- Database Path: Always next to .exe ----------
 def get_db_path():
-    if os.name == 'nt':
-        appdata = os.getenv('APPDATA')
-        if not appdata:
-            appdata = os.path.expanduser('~/AppData/Roaming')
-        db_dir = os.path.join(appdata, 'AttendanceSystem')
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        base_dir = os.path.dirname(sys.executable)
     else:
-        db_dir = os.path.expanduser('~/.local/share/AttendanceSystem')
-    os.makedirs(db_dir, exist_ok=True)
-    return os.path.join(db_dir, 'attendance.db')
+        # Running as script
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Create directory if it doesn't exist (just in case)
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, 'attendance.db')
 
 DB_PATH = get_db_path()
 
@@ -326,7 +322,7 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- Import Attendance (unchanged) ----------
+    # ---------- Import Attendance ----------
     def import_attendance(self):
         file_path = filedialog.askopenfilename(
             title="Select attendance file",
@@ -398,7 +394,7 @@ class AttendanceApp:
         except Exception as e:
             messagebox.showerror("Error", f"Excel import failed: {str(e)}")
 
-    # ---------- Import Roster (updated for new format) ----------
+    # ---------- Import Roster ----------
     def import_roster(self):
         if not HAS_OPENPYXL:
             messagebox.showerror("Error", "openpyxl is required for roster import. Please install: pip install openpyxl")
@@ -415,9 +411,8 @@ class AttendanceApp:
             wb = load_workbook(file_path, data_only=True)
             ws = wb.active
 
-            # Step 1: Find the row that contains dates (like "21-6月" or "26/06/26")
             date_row_idx = None
-            date_cols = []  # list of (col_idx, date_str_parsed)
+            date_cols = []
             for row_idx in range(1, min(15, ws.max_row + 1)):
                 row_values = [cell.value for cell in ws[row_idx]]
                 found = False
@@ -435,11 +430,8 @@ class AttendanceApp:
                 messagebox.showerror("Error", "No date columns found in the first 15 rows.")
                 return
 
-            # Sort by column index
             date_cols.sort(key=lambda x: x[0])
             first_date_col = date_cols[0][0]
-
-            # Determine name column: assume it's immediately to the left of the first date column
             name_col = first_date_col - 1
             if name_col < 1:
                 messagebox.showerror("Error", "Name column not found (must be before date columns).")
@@ -447,7 +439,6 @@ class AttendanceApp:
 
             self.log_message(f"Detected date row: {date_row_idx}, name column: {name_col}, first date col: {first_date_col}")
 
-            # Step 2: Iterate over rows below date row
             inserted = 0
             skipped = 0
             for row_idx in range(date_row_idx + 1, ws.max_row + 1):
@@ -470,7 +461,7 @@ class AttendanceApp:
                     if shift_code in SHIFT_MAP:
                         times = SHIFT_MAP[shift_code]
                         if times is None:
-                            continue  # off/leave
+                            continue
                         work_start, work_end = times
                         upsert_work_schedule(staff_id, date_str, date_str, work_start, work_end)
                         inserted += 1
@@ -484,9 +475,8 @@ class AttendanceApp:
             messagebox.showerror("Error", f"Roster import failed: {str(e)}")
 
     def parse_date(self, date_str):
-        """Parse date strings in formats: '21-6月' or '26/06/26' -> YYYY-MM-DD"""
         s = date_str.strip()
-        # Try Chinese format: DD-M月
+        # Chinese format: DD-M月
         match = re.match(r'^(\d{1,2})-(\d{1,2})月$', s)
         if match:
             day = int(match.group(1))
@@ -497,7 +487,7 @@ class AttendanceApp:
                     return dt.isoformat()
                 except ValueError:
                     return None
-        # Try format: DD/MM/YY  (e.g., 26/06/26)
+        # Format: DD/MM/YY
         match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', s)
         if match:
             day = int(match.group(1))
@@ -512,7 +502,7 @@ class AttendanceApp:
                     return None
         return None
 
-    # ---------- Barcode Scan (unchanged) ----------
+    # ---------- Barcode Scan ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -562,6 +552,7 @@ class AttendanceApp:
         dialog.grab_set()
         dialog.focus_force()
 
+        # Disable main controls
         self.barcode_entry.config(state=tk.DISABLED)
         self.scan_btn.config(state=tk.DISABLED)
 
@@ -586,11 +577,22 @@ class AttendanceApp:
         btn_frame = ttk.Frame(dialog)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
 
+        # Function to re-enable main controls and clean up
+        def reset_after_dialog():
+            self.barcode_entry.config(state=tk.NORMAL)
+            self.scan_btn.config(state=tk.NORMAL)
+            self.barcode_entry.focus_set()
+            self.confirm_dialog = None
+            if self.timer_id:
+                self.root.after_cancel(self.timer_id)
+                self.timer_id = None
+
         def do_confirm():
             if self.timer_id:
                 dialog.after_cancel(self.timer_id)
                 self.timer_id = None
             self.perform_action(staff_id, action_key, current_time)
+            reset_after_dialog()
             dialog.destroy()
 
         def do_cancel():
@@ -598,6 +600,7 @@ class AttendanceApp:
                 dialog.after_cancel(self.timer_id)
                 self.timer_id = None
             self.log_message(f"Confirmation cancelled for {name}")
+            reset_after_dialog()
             dialog.destroy()
 
         confirm_btn = ttk.Button(btn_frame, text="Confirm", command=do_confirm, width=12)
@@ -605,18 +608,25 @@ class AttendanceApp:
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
         cancel_btn.pack(side=tk.LEFT, padx=10)
 
-        self.update_countdown(dialog, staff_id, action_key, current_time)
+        # Start countdown
+        self.update_countdown(dialog, staff_id, action_key, current_time, reset_after_dialog)
+
+        # Handle window close (X button)
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    def update_countdown(self, dialog, staff_id, action_key, current_time):
+    def update_countdown(self, dialog, staff_id, action_key, current_time, reset_callback):
         if self.countdown <= 0:
+            # Auto-confirm
+            if self.timer_id:
+                self.timer_id = None
             self.perform_action(staff_id, action_key, current_time)
+            reset_callback()
             dialog.destroy()
             return
 
         self.countdown_label.config(text=f"Auto‑confirm in {self.countdown} seconds")
         self.countdown -= 1
-        self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time)
+        self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time, reset_callback)
 
     def perform_action(self, staff_id, action_key, time_str):
         if action_key == "checkin":
@@ -633,12 +643,6 @@ class AttendanceApp:
             return
 
         self.update_status(staff_id)
-        self.barcode_entry.config(state=tk.NORMAL)
-        self.scan_btn.config(state=tk.NORMAL)
-        self.confirm_dialog = None
-        if self.timer_id:
-            self.root.after_cancel(self.timer_id)
-            self.timer_id = None
 
     # ---------- Staff Management ----------
     def add_new_staff(self, staff_id):
