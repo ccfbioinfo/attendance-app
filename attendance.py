@@ -1,5 +1,10 @@
 """
-Staff Duty Attendance System - Fixed DB location and cancel bug
+Staff Duty Attendance System v3.0
+- No manual edit of attendance records
+- Smart auto-completion in monthly report:
+  - Partial checkin/checkout: fill missing time from schedule
+  - No records: mark as "Forgot Check" or "Off Day" based on schedule
+- 8.8 hrs threshold with 5-min grace
 """
 
 import sqlite3
@@ -21,6 +26,9 @@ except ImportError:
 WORK_START = "09:00:00"
 WORK_END   = "18:00:00"
 CURRENT_YEAR = datetime.date.today().year
+STANDARD_HOURS = 8.8
+GRACE_MINUTES = 5
+GRACE_HOURS = GRACE_MINUTES / 60.0
 
 # ---------- Shift Code Mapping ----------
 SHIFT_MAP = {
@@ -59,12 +67,9 @@ SHIFT_MAP = {
 # ---------- Database Path: Always next to .exe ----------
 def get_db_path():
     if getattr(sys, 'frozen', False):
-        # Running as compiled executable
         base_dir = os.path.dirname(sys.executable)
     else:
-        # Running as script
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    # Create directory if it doesn't exist (just in case)
     os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, 'attendance.db')
 
@@ -219,12 +224,23 @@ def get_monthly_attendance(year, month):
     conn.close()
     return rows
 
+def calculate_work_hours(checkin_str, checkout_str):
+    try:
+        ci = datetime.datetime.strptime(checkin_str, "%H:%M:%S")
+        co = datetime.datetime.strptime(checkout_str, "%H:%M:%S")
+        if co <= ci:
+            co += datetime.timedelta(days=1)
+        delta = co - ci
+        return delta.total_seconds() / 3600.0
+    except:
+        return 0.0
+
 # ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System")
-        self.root.geometry("650x500")
+        self.root.title("Staff Attendance System v3.0")
+        self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
         self.timer_id = None
@@ -239,8 +255,8 @@ class AttendanceApp:
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
-                            f"Default work hours: {WORK_START} - {WORK_END}\n"
-                            "Individual schedules can be imported from roster.")
+                            f"Standard work hours: {STANDARD_HOURS} hrs (±{GRACE_MINUTES} min grace)\n"
+                            "Missing check-in/out will be auto-completed in reports.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -275,6 +291,7 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Import Attendance", command=self.import_attendance).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Import Roster (Excel)", command=self.import_roster).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
         log_frame = ttk.LabelFrame(self.root, text="Recent Activity", padding=10)
@@ -322,7 +339,7 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- Import Attendance ----------
+    # ---------- Import Attendance (CSV/Excel) ----------
     def import_attendance(self):
         file_path = filedialog.askopenfilename(
             title="Select attendance file",
@@ -476,7 +493,6 @@ class AttendanceApp:
 
     def parse_date(self, date_str):
         s = date_str.strip()
-        # Chinese format: DD-M月
         match = re.match(r'^(\d{1,2})-(\d{1,2})月$', s)
         if match:
             day = int(match.group(1))
@@ -487,7 +503,6 @@ class AttendanceApp:
                     return dt.isoformat()
                 except ValueError:
                     return None
-        # Format: DD/MM/YY
         match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', s)
         if match:
             day = int(match.group(1))
@@ -552,7 +567,6 @@ class AttendanceApp:
         dialog.grab_set()
         dialog.focus_force()
 
-        # Disable main controls
         self.barcode_entry.config(state=tk.DISABLED)
         self.scan_btn.config(state=tk.DISABLED)
 
@@ -577,7 +591,6 @@ class AttendanceApp:
         btn_frame = ttk.Frame(dialog)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
 
-        # Function to re-enable main controls and clean up
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
             self.scan_btn.config(state=tk.NORMAL)
@@ -608,15 +621,11 @@ class AttendanceApp:
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
         cancel_btn.pack(side=tk.LEFT, padx=10)
 
-        # Start countdown
         self.update_countdown(dialog, staff_id, action_key, current_time, reset_after_dialog)
-
-        # Handle window close (X button)
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
     def update_countdown(self, dialog, staff_id, action_key, current_time, reset_callback):
         if self.countdown <= 0:
-            # Auto-confirm
             if self.timer_id:
                 self.timer_id = None
             self.perform_action(staff_id, action_key, current_time)
@@ -641,25 +650,9 @@ class AttendanceApp:
         else:
             self.log_message("Unknown action – nothing stored")
             return
-
         self.update_status(staff_id)
 
-    # ---------- Staff Management ----------
-    def add_new_staff(self, staff_id):
-        name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
-        if name:
-            batch = simpledialog.askstring("Add Staff", "Enter batch (optional):", parent=self.root)
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            try:
-                c.execute("INSERT INTO staff (staff_id, name, batch) VALUES (?, ?, ?)",
-                          (staff_id, name, batch))
-                conn.commit()
-                self.log_message(f"Added staff: {name} ({staff_id})")
-            except sqlite3.IntegrityError:
-                messagebox.showerror("Error", "Staff ID already exists.")
-            conn.close()
-
+    # ---------- Staff Management (No Edit Attendance) ----------
     def manage_staff(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Staff")
@@ -742,6 +735,22 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Edit", command=edit_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
+
+    # ---------- Add New Staff (helper) ----------
+    def add_new_staff(self, staff_id):
+        name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
+        if name:
+            batch = simpledialog.askstring("Add Staff", "Enter batch (optional):", parent=self.root)
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            try:
+                c.execute("INSERT INTO staff (staff_id, name, batch) VALUES (?, ?, ?)",
+                          (staff_id, name, batch))
+                conn.commit()
+                self.log_message(f"Added staff: {name} ({staff_id})")
+            except sqlite3.IntegrityError:
+                messagebox.showerror("Error", "Staff ID already exists.")
+            conn.close()
 
     # ---------- Monthly Exception Report ----------
     def show_monthly_summary(self):
@@ -839,6 +848,154 @@ class AttendanceApp:
             ttk.Button(result_win, text="Export CSV", command=export_exceptions).pack(pady=5)
 
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
+
+    # ---------- Full Monthly Report with Auto-Completion ----------
+    def export_full_monthly_report(self):
+        win = tk.Toplevel(self.root)
+        win.title("Full Monthly Report")
+        win.geometry("400x200")
+
+        ttk.Label(win, text="Select Month:").pack(pady=10)
+        ttk.Label(win, text="Enter year and month (YYYY-MM):").pack()
+        entry = ttk.Entry(win)
+        entry.pack(pady=5)
+        entry.insert(0, datetime.date.today().strftime("%Y-%m"))
+
+        def generate():
+            date_str = entry.get()
+            try:
+                year, month = map(int, date_str.split('-'))
+            except:
+                messagebox.showerror("Error", "Invalid date format. Use YYYY-MM")
+                return
+
+            # Get all staff
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT staff_id, name, batch FROM staff ORDER BY name")
+            all_staff = c.fetchall()
+            conn.close()
+
+            if not all_staff:
+                messagebox.showinfo("No Staff", "No staff records found.")
+                return
+
+            # Generate list of all days in the month
+            first_day = datetime.date(year, month, 1)
+            if month == 12:
+                next_month = datetime.date(year + 1, 1, 1)
+            else:
+                next_month = datetime.date(year, month + 1, 1)
+            all_dates = []
+            current = first_day
+            while current < next_month:
+                all_dates.append(current.isoformat())
+                current += datetime.timedelta(days=1)
+
+            report_data = []
+
+            for staff_id, name, batch in all_staff:
+                # Get all attendance records for this staff in the month
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute('''
+                    SELECT date, checkin, checkout
+                    FROM attendance
+                    WHERE staff_id=? AND date >= ? AND date < ?
+                ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
+                records = {row[0]: (row[1], row[2]) for row in c.fetchall()}
+                conn.close()
+
+                for date_str in all_dates:
+                    # Check schedule for this day
+                    schedule = get_work_schedule_for_date(staff_id, date_str)
+                    if not schedule:
+                        # No schedule => Off Day
+                        report_data.append({
+                            "Staff ID": staff_id,
+                            "Name": name,
+                            "Batch": batch or "",
+                            "Date": date_str,
+                            "Checkin": "",
+                            "Checkout": "",
+                            "Work Hours": "0.00",
+                            "Status": "Off Day"
+                        })
+                        continue
+
+                    work_start, work_end = schedule
+
+                    # Check actual attendance
+                    if date_str in records:
+                        checkin, checkout = records[date_str]
+                        # If only checkin exists, fill checkout
+                        if checkin and not checkout:
+                            checkout = work_end
+                            status_note = " (Auto-completed checkout)"
+                        elif not checkin and checkout:
+                            checkin = work_start
+                            status_note = " (Auto-completed checkin)"
+                        elif checkin and checkout:
+                            status_note = ""
+                        else:
+                            # Should not happen, but if both None, treat as forgot
+                            checkin = work_start
+                            checkout = work_end
+                            status_note = " (No data, auto-filled)"
+                    else:
+                        # No attendance record at all => Forgot Check
+                        checkin = work_start
+                        checkout = work_end
+                        status_note = " (Forgot Check)"
+
+                    # Calculate hours and determine status
+                    work_hrs = calculate_work_hours(checkin, checkout) if checkin and checkout else 0.0
+                    if work_hrs == 0:
+                        status = "No Data"
+                    elif abs(work_hrs - STANDARD_HOURS) <= GRACE_HOURS:
+                        status = "Normal"
+                    elif work_hrs < STANDARD_HOURS - GRACE_HOURS:
+                        status = "Early Leave"
+                    else:
+                        status = "Overtime"
+
+                    # Append status note if auto-completed or forgot
+                    if status_note:
+                        status += status_note
+
+                    report_data.append({
+                        "Staff ID": staff_id,
+                        "Name": name,
+                        "Batch": batch or "",
+                        "Date": date_str,
+                        "Checkin": checkin or "",
+                        "Checkout": checkout or "",
+                        "Work Hours": f"{work_hrs:.2f}",
+                        "Status": status
+                    })
+
+            if not report_data:
+                messagebox.showinfo("No Data", "No data to export.")
+                return
+
+            # Save CSV
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv")],
+                title="Save Full Monthly Report"
+            )
+            if not file_path:
+                return
+
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", "Work Hours", "Status"])
+                writer.writeheader()
+                writer.writerows(report_data)
+
+            messagebox.showinfo("Export Complete", f"Full monthly report saved to:\n{file_path}")
+
+        ttk.Button(win, text="Generate & Export CSV", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
 
