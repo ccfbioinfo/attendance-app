@@ -1,9 +1,11 @@
 """
-Staff Duty Attendance System v3.0
+Staff Duty Attendance System v3.1
 - No manual edit of attendance records
-- Smart auto-completion in monthly report:
-  - Partial checkin/checkout: fill missing time from schedule
-  - No records: mark as "Forgot Check" or "Off Day" based on schedule
+- Monthly report:
+  - Only checkin: mark "No Checkout Record"
+  - Only checkout: mark "No Checkin Record"
+  - No records: mark "Forgot Check"
+  - Off day: mark "Off Day"
 - 8.8 hrs threshold with 5-min grace
 """
 
@@ -239,7 +241,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.0")
+        self.root.title("Staff Attendance System v3.1")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -256,7 +258,7 @@ class AttendanceApp:
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (±{GRACE_MINUTES} min grace)\n"
-                            "Missing check-in/out will be auto-completed in reports.")
+                            "Missing check-in/out will be marked in reports.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -850,7 +852,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report with Auto-Completion ----------
+    # ---------- Full Monthly Report with proper partial record handling ----------
     def export_full_monthly_report(self):
         win = tk.Toplevel(self.root)
         win.title("Full Monthly Report")
@@ -929,51 +931,74 @@ class AttendanceApp:
                     # Check actual attendance
                     if date_str in records:
                         checkin, checkout = records[date_str]
-                        # If only checkin exists, fill checkout
-                        if checkin and not checkout:
-                            checkout = work_end
-                            status_note = " (Auto-completed checkout)"
+                        # Evaluate cases
+                        if checkin and checkout:
+                            # Both present: compute hours and status
+                            work_hrs = calculate_work_hours(checkin, checkout)
+                            if abs(work_hrs - STANDARD_HOURS) <= GRACE_HOURS:
+                                status = "Normal"
+                            elif work_hrs < STANDARD_HOURS - GRACE_HOURS:
+                                status = "Early Leave"
+                            else:
+                                status = "Overtime"
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": checkin,
+                                "Checkout": checkout,
+                                "Work Hours": f"{work_hrs:.2f}",
+                                "Status": status
+                            })
+                        elif checkin and not checkout:
+                            # Only checkin -> No Checkout Record
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": checkin,
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "No Checkout Record"
+                            })
                         elif not checkin and checkout:
-                            checkin = work_start
-                            status_note = " (Auto-completed checkin)"
-                        elif checkin and checkout:
-                            status_note = ""
+                            # Only checkout -> No Checkin Record
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": checkout,
+                                "Work Hours": "0.00",
+                                "Status": "No Checkin Record"
+                            })
                         else:
-                            # Should not happen, but if both None, treat as forgot
-                            checkin = work_start
-                            checkout = work_end
-                            status_note = " (No data, auto-filled)"
+                            # Should not happen, but if both None
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "Forgot Check"
+                            })
                     else:
-                        # No attendance record at all => Forgot Check
-                        checkin = work_start
-                        checkout = work_end
-                        status_note = " (Forgot Check)"
-
-                    # Calculate hours and determine status
-                    work_hrs = calculate_work_hours(checkin, checkout) if checkin and checkout else 0.0
-                    if work_hrs == 0:
-                        status = "No Data"
-                    elif abs(work_hrs - STANDARD_HOURS) <= GRACE_HOURS:
-                        status = "Normal"
-                    elif work_hrs < STANDARD_HOURS - GRACE_HOURS:
-                        status = "Early Leave"
-                    else:
-                        status = "Overtime"
-
-                    # Append status note if auto-completed or forgot
-                    if status_note:
-                        status += status_note
-
-                    report_data.append({
-                        "Staff ID": staff_id,
-                        "Name": name,
-                        "Batch": batch or "",
-                        "Date": date_str,
-                        "Checkin": checkin or "",
-                        "Checkout": checkout or "",
-                        "Work Hours": f"{work_hrs:.2f}",
-                        "Status": status
-                    })
+                        # No attendance record at all -> Forgot Check
+                        report_data.append({
+                            "Staff ID": staff_id,
+                            "Name": name,
+                            "Batch": batch or "",
+                            "Date": date_str,
+                            "Checkin": "",
+                            "Checkout": "",
+                            "Work Hours": "0.00",
+                            "Status": "Forgot Check"
+                        })
 
             if not report_data:
                 messagebox.showinfo("No Data", "No data to export.")
