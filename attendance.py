@@ -1,12 +1,7 @@
 """
-Staff Duty Attendance System v3.1
-- No manual edit of attendance records
-- Monthly report:
-  - Only checkin: mark "No Checkout Record"
-  - Only checkout: mark "No Checkin Record"
-  - No records: mark "Forgot Check"
-  - Off day: mark "Off Day"
-- 8.8 hrs threshold with 5-min grace
+Staff Duty Attendance System v3.2
+- Full monthly report: handles records even when schedule missing (uses default hours)
+- Monthly exceptions report: includes all anomalies (No Checkin, No Checkout, Forgot Check, Late, Early Leave)
 """
 
 import sqlite3
@@ -241,7 +236,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.1")
+        self.root.title("Staff Attendance System v3.2")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -754,7 +749,7 @@ class AttendanceApp:
                 messagebox.showerror("Error", "Staff ID already exists.")
             conn.close()
 
-    # ---------- Monthly Exception Report ----------
+    # ---------- Monthly Exception Report (Enhanced) ----------
     def show_monthly_summary(self):
         win = tk.Toplevel(self.root)
         win.title("Monthly Exception Report")
@@ -774,77 +769,118 @@ class AttendanceApp:
                 messagebox.showerror("Error", "Invalid date format. Use YYYY-MM")
                 return
 
-            all_records = get_monthly_attendance(year, month)
-            if not all_records:
-                messagebox.showinfo("No Data", "No attendance records for this month.")
+            # Get all staff
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT staff_id, name, batch FROM staff ORDER BY name")
+            all_staff = c.fetchall()
+            conn.close()
+
+            if not all_staff:
+                messagebox.showinfo("No Staff", "No staff records found.")
                 return
 
-            exceptions = {}
-            for row in all_records:
-                staff_id, name, batch, date_str, checkin_str, checkout_str = row
-                schedule = get_work_schedule_for_date(staff_id, date_str)
-                if schedule:
-                    work_start_str, work_end_str = schedule
-                else:
-                    work_start_str, work_end_str = WORK_START, WORK_END
-                try:
-                    checkin_time = datetime.datetime.strptime(checkin_str, "%H:%M:%S").time()
-                    checkout_time = datetime.datetime.strptime(checkout_str, "%H:%M:%S").time()
-                    work_start = datetime.datetime.strptime(work_start_str, "%H:%M:%S").time()
-                    work_end = datetime.datetime.strptime(work_end_str, "%H:%M:%S").time()
-                except ValueError:
-                    continue
+            first_day = datetime.date(year, month, 1)
+            if month == 12:
+                next_month = datetime.date(year + 1, 1, 1)
+            else:
+                next_month = datetime.date(year, month + 1, 1)
+            all_dates = []
+            current = first_day
+            while current < next_month:
+                all_dates.append(current.isoformat())
+                current += datetime.timedelta(days=1)
 
-                issues = []
-                if checkin_time > work_start:
-                    issues.append(("Late", checkin_str))
-                if checkout_time < work_end:
-                    issues.append(("Early Leave", checkout_str))
+            exceptions = {}  # staff_id -> list of (date, issue_type, detail)
 
-                if issues:
-                    if staff_id not in exceptions:
-                        exceptions[staff_id] = {'name': name, 'batch': batch, 'days': []}
-                    for issue_type, time_val in issues:
-                        exceptions[staff_id]['days'].append((date_str, issue_type, time_val))
+            for staff_id, name, batch in all_staff:
+                # Get attendance records for the month
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute('''
+                    SELECT date, checkin, checkout
+                    FROM attendance
+                    WHERE staff_id=? AND date >= ? AND date < ?
+                ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
+                records = {row[0]: (row[1], row[2]) for row in c.fetchall()}
+                conn.close()
+
+                for date_str in all_dates:
+                    schedule = get_work_schedule_for_date(staff_id, date_str)
+                    if schedule:
+                        work_start, work_end = schedule
+                    else:
+                        work_start, work_end = WORK_START, WORK_END
+
+                    if date_str in records:
+                        checkin, checkout = records[date_str]
+                        # Check anomalies
+                        if checkin and not checkout:
+                            # Only checkin
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "No Checkout Record", f"Checkin: {checkin}"))
+                        elif not checkin and checkout:
+                            # Only checkout
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "No Checkin Record", f"Checkout: {checkout}"))
+                        else:
+                            # Both present -> check late/early leave
+                            try:
+                                ci = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
+                                co = datetime.datetime.strptime(checkout, "%H:%M:%S").time()
+                                ws = datetime.datetime.strptime(work_start, "%H:%M:%S").time()
+                                we = datetime.datetime.strptime(work_end, "%H:%M:%S").time()
+                                if ci > ws:
+                                    exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                                    exceptions[staff_id]['days'].append((date_str, "Late", f"Checkin: {checkin} (Start: {work_start})"))
+                                if co < we:
+                                    exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                                    exceptions[staff_id]['days'].append((date_str, "Early Leave", f"Checkout: {checkout} (End: {work_end})"))
+                            except:
+                                pass
+                    else:
+                        # No record at all -> Forgot Check (only if schedule exists, else skip or mark Off Day)
+                        if schedule:
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "Forgot Check", "No check-in/out recorded"))
 
             if not exceptions:
-                messagebox.showinfo("All Good", "No late arrivals or early departures for this month.")
+                messagebox.showinfo("All Good", "No exceptions found for this month.")
                 return
 
             result_win = tk.Toplevel(win)
             result_win.title(f"Exception Report - {year}-{month:02d}")
-            result_win.geometry("800x500")
+            result_win.geometry("900x500")
 
-            tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Time"), show="headings")
+            tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Detail"), show="headings")
             tree.heading("Staff", text="Staff (ID)")
             tree.heading("Batch", text="Batch")
             tree.heading("Date", text="Date")
             tree.heading("Issue", text="Issue Type")
-            tree.heading("Time", text="Recorded Time")
+            tree.heading("Detail", text="Detail")
             tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
             for staff_id, data in exceptions.items():
-                for date_str, issue_type, time_val in data['days']:
+                for date_str, issue, detail in data['days']:
                     tree.insert("", tk.END, values=(
                         f"{data['name']} ({staff_id})",
                         data['batch'] or "-",
                         date_str,
-                        issue_type,
-                        time_val
+                        issue,
+                        detail
                     ))
 
             def export_exceptions():
-                import csv
                 file_path = filedialog.asksaveasfilename(defaultextension=".csv",
                                                          filetypes=[("CSV files", "*.csv")])
                 if not file_path:
                     return
-                with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Recorded Time"])
+                    writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Detail"])
                     for staff_id, data in exceptions.items():
-                        for date_str, issue_type, time_val in data['days']:
-                            writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue_type, time_val])
+                        for date_str, issue, detail in data['days']:
+                            writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue, detail])
                 messagebox.showinfo("Export", f"Report exported to {file_path}")
 
             ttk.Button(result_win, text="Export CSV", command=export_exceptions).pack(pady=5)
@@ -852,7 +888,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report with proper partial record handling ----------
+    # ---------- Full Monthly Report (with fallback to default hours) ----------
     def export_full_monthly_report(self):
         win = tk.Toplevel(self.root)
         win.title("Full Monthly Report")
@@ -883,7 +919,6 @@ class AttendanceApp:
                 messagebox.showinfo("No Staff", "No staff records found.")
                 return
 
-            # Generate list of all days in the month
             first_day = datetime.date(year, month, 1)
             if month == 12:
                 next_month = datetime.date(year + 1, 1, 1)
@@ -898,7 +933,7 @@ class AttendanceApp:
             report_data = []
 
             for staff_id, name, batch in all_staff:
-                # Get all attendance records for this staff in the month
+                # Get attendance records
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute('''
@@ -910,30 +945,15 @@ class AttendanceApp:
                 conn.close()
 
                 for date_str in all_dates:
-                    # Check schedule for this day
                     schedule = get_work_schedule_for_date(staff_id, date_str)
-                    if not schedule:
-                        # No schedule => Off Day
-                        report_data.append({
-                            "Staff ID": staff_id,
-                            "Name": name,
-                            "Batch": batch or "",
-                            "Date": date_str,
-                            "Checkin": "",
-                            "Checkout": "",
-                            "Work Hours": "0.00",
-                            "Status": "Off Day"
-                        })
-                        continue
+                    if schedule:
+                        work_start, work_end = schedule
+                    else:
+                        work_start, work_end = WORK_START, WORK_END
 
-                    work_start, work_end = schedule
-
-                    # Check actual attendance
                     if date_str in records:
                         checkin, checkout = records[date_str]
-                        # Evaluate cases
                         if checkin and checkout:
-                            # Both present: compute hours and status
                             work_hrs = calculate_work_hours(checkin, checkout)
                             if abs(work_hrs - STANDARD_HOURS) <= GRACE_HOURS:
                                 status = "Normal"
@@ -952,7 +972,6 @@ class AttendanceApp:
                                 "Status": status
                             })
                         elif checkin and not checkout:
-                            # Only checkin -> No Checkout Record
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
@@ -964,7 +983,6 @@ class AttendanceApp:
                                 "Status": "No Checkout Record"
                             })
                         elif not checkin and checkout:
-                            # Only checkout -> No Checkin Record
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
@@ -976,7 +994,7 @@ class AttendanceApp:
                                 "Status": "No Checkin Record"
                             })
                         else:
-                            # Should not happen, but if both None
+                            # Should not happen
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
@@ -988,23 +1006,34 @@ class AttendanceApp:
                                 "Status": "Forgot Check"
                             })
                     else:
-                        # No attendance record at all -> Forgot Check
-                        report_data.append({
-                            "Staff ID": staff_id,
-                            "Name": name,
-                            "Batch": batch or "",
-                            "Date": date_str,
-                            "Checkin": "",
-                            "Checkout": "",
-                            "Work Hours": "0.00",
-                            "Status": "Forgot Check"
-                        })
+                        # No record at all
+                        if schedule:
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "Forgot Check"
+                            })
+                        else:
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "Off Day"
+                            })
 
             if not report_data:
                 messagebox.showinfo("No Data", "No data to export.")
                 return
 
-            # Save CSV
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV files", "*.csv")],
