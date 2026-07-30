@@ -1,9 +1,7 @@
 """
-Staff Duty Attendance System v5.0
-- Barcode scan with shift selection
-- Clock-on / Clock-off (instead of check-in/out)
-- 8.8 hrs threshold with 5-min grace
-- Fixed shift options (selectable per day)
+Staff Duty Attendance System v3.3
+- Removed "Import Attendance" function.
+- Kept: barcode scan, roster import, monthly exception report, full monthly report.
 """
 
 import sqlite3
@@ -13,6 +11,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import os
 import sys
 import csv
+import re
 
 try:
     from openpyxl import load_workbook
@@ -21,21 +20,46 @@ except ImportError:
     HAS_OPENPYXL = False
 
 # ---------- Configuration ----------
+WORK_START = "09:00:00"
+WORK_END   = "18:00:00"
+CURRENT_YEAR = datetime.date.today().year
 STANDARD_HOURS = 8.8
 GRACE_MINUTES = 5
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Options (display, start, end) ----------
-SHIFT_OPTIONS = [
-    ("08:00 - 16:48", "08:00", "16:48"),
-    ("08:30 - 17:18", "08:30", "17:18"),
-    ("09:00 - 17:00", "09:00", "17:00"),
-    ("09:00 - 17:48", "09:00", "17:48"),
-    ("09:00 - 18:00", "09:00", "18:00"),
-    ("10:00 - 18:48", "10:00", "18:48"),
-    ("13:00 - 21:48", "13:00", "21:48"),
-    ("21:30 - 08:30", "21:30", "08:30"),
-]
+# ---------- Shift Code Mapping ----------
+SHIFT_MAP = {
+    "MD":   ("08:00", "16:48"),
+    "D8":   ("08:00", "16:48"),
+    "R8":   ("08:00", "16:48"),
+    "D/SD": ("09:00", "17:48"),
+    "R10":  ("10:00", "18:48"),
+    "P":    ("13:00", "21:48"),
+    "N":    ("21:30", "08:30"),
+    "W":    ("08:30", "17:18"),
+    "AA1":  ("09:00", "18:00"),
+    "AA2":  ("09:00", "17:00"),
+    "D4":   ("08:00", "16:48"),
+    "D1":   ("08:00", "16:48"),
+    "D3":   ("08:00", "16:48"),
+    "D5":   ("08:00", "16:48"),
+    "D6":   ("08:00", "16:48"),
+    "MD1":  ("08:00", "16:48"),
+    "MD2":  ("08:00", "16:48"),
+    "MD3":  ("08:00", "16:48"),
+    "MD4":  ("08:00", "16:48"),
+    "MD5":  ("08:00", "16:48"),
+    "SD":   ("09:00", "17:48"),
+    "PH":   ("09:00", "17:48"),
+    "Ag/gP": ("13:00", "21:48"),
+    "Ag2/gP2": ("13:00", "21:48"),
+    "O":    None,
+    "AL":   None,
+    "SL":   None,
+    "AM AL/ PM SL": None,
+    "D/ PM NPL": None,
+    "AA2/ PM SL": None,
+}
 
 # ---------- Database Path: Always next to .exe ----------
 def get_db_path():
@@ -48,7 +72,7 @@ def get_db_path():
 
 DB_PATH = get_db_path()
 
-# ---------- Database Setup with Shift Columns ----------
+# ---------- Database Setup ----------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -64,21 +88,24 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             staff_id TEXT NOT NULL,
             date TEXT NOT NULL,
-            clock_on TEXT,
-            clock_off TEXT,
-            shift_start TEXT,
-            shift_end TEXT,
+            checkin TEXT,
+            checkout TEXT,
             FOREIGN KEY (staff_id) REFERENCES staff(staff_id),
             UNIQUE(staff_id, date)
         )
     ''')
-    # Check if shift columns exist (for upgrading old DB)
-    c.execute("PRAGMA table_info(attendance)")
-    columns = [col[1] for col in c.fetchall()]
-    if 'shift_start' not in columns:
-        c.execute("ALTER TABLE attendance ADD COLUMN shift_start TEXT")
-    if 'shift_end' not in columns:
-        c.execute("ALTER TABLE attendance ADD COLUMN shift_end TEXT")
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS work_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_id TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            work_start TEXT NOT NULL,
+            work_end TEXT NOT NULL,
+            FOREIGN KEY (staff_id) REFERENCES staff(staff_id),
+            UNIQUE(staff_id, start_date, end_date)
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -103,59 +130,76 @@ def get_today_attendance(staff_id):
     today = datetime.date.today().isoformat()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT clock_on, clock_off, shift_start, shift_end FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
+    c.execute("SELECT checkin, checkout FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
     row = c.fetchone()
     conn.close()
     return row
 
-def set_clock_on(staff_id, time_str, shift_start, shift_end):
+def set_checkin(staff_id, time_str):
     today = datetime.date.today().isoformat()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
-        INSERT OR REPLACE INTO attendance (staff_id, date, clock_on, clock_off, shift_start, shift_end)
-        VALUES (?, ?, ?, NULL, ?, ?)
-    ''', (staff_id, today, time_str, shift_start, shift_end))
+        INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout)
+        VALUES (?, ?, ?, NULL)
+    ''', (staff_id, today, time_str))
     conn.commit()
     conn.close()
 
-def set_clock_off(staff_id, time_str):
+def set_checkout(staff_id, time_str):
     today = datetime.date.today().isoformat()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
-        UPDATE attendance SET clock_off=?
-        WHERE staff_id=? AND date=? AND clock_on IS NOT NULL
+        UPDATE attendance SET checkout=?
+        WHERE staff_id=? AND date=? AND checkin IS NOT NULL
     ''', (time_str, staff_id, today))
     conn.commit()
     conn.close()
 
-def upsert_attendance(staff_id, date_str, clock_on, clock_off, shift_start=None, shift_end=None):
+def override_checkin(staff_id, time_str):
+    today = datetime.date.today().isoformat()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    if shift_start and shift_end:
-        c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, clock_on, clock_off, shift_start, shift_end)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (staff_id, date_str, clock_on, clock_off, shift_start, shift_end))
-    else:
-        c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, clock_on, clock_off, shift_start, shift_end)
-            VALUES (?, ?, ?, ?, NULL, NULL)
-        ''', (staff_id, date_str, clock_on, clock_off))
+    c.execute('''
+        UPDATE attendance SET checkin=?, checkout=NULL
+        WHERE staff_id=? AND date=?
+    ''', (time_str, staff_id, today))
     conn.commit()
     conn.close()
 
-def calculate_work_hours(clock_on_str, clock_off_str):
-    try:
-        ci = datetime.datetime.strptime(clock_on_str, "%H:%M:%S")
-        co = datetime.datetime.strptime(clock_off_str, "%H:%M:%S")
-        if co <= ci:
-            co += datetime.timedelta(days=1)
-        delta = co - ci
-        return delta.total_seconds() / 3600.0
-    except:
-        return 0.0
+def upsert_attendance(staff_id, date_str, checkin, checkout):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout)
+        VALUES (?, ?, ?, ?)
+    ''', (staff_id, date_str, checkin, checkout))
+    conn.commit()
+    conn.close()
+
+def upsert_work_schedule(staff_id, start_date, end_date, work_start, work_end):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO work_schedule (staff_id, start_date, end_date, work_start, work_end)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (staff_id, start_date, end_date, work_start, work_end))
+    conn.commit()
+    conn.close()
+
+def get_work_schedule_for_date(staff_id, date_str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT work_start, work_end
+        FROM work_schedule
+        WHERE staff_id = ? AND ? BETWEEN start_date AND end_date
+        ORDER BY start_date DESC LIMIT 1
+    ''', (staff_id, date_str))
+    row = c.fetchone()
+    conn.close()
+    return row if row else None
 
 def get_monthly_attendance(year, month):
     start_date = f"{year}-{month:02d}-01"
@@ -166,22 +210,33 @@ def get_monthly_attendance(year, month):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
-        SELECT s.staff_id, s.name, s.batch, a.date, a.clock_on, a.clock_off, a.shift_start, a.shift_end
+        SELECT s.staff_id, s.name, s.batch, a.date, a.checkin, a.checkout
         FROM attendance a
         JOIN staff s ON a.staff_id = s.staff_id
         WHERE a.date >= ? AND a.date < ?
-          AND a.clock_on IS NOT NULL AND a.clock_off IS NOT NULL
+          AND a.checkin IS NOT NULL AND a.checkout IS NOT NULL
         ORDER BY s.staff_id, a.date
     ''', (start_date, end_date))
     rows = c.fetchall()
     conn.close()
     return rows
 
+def calculate_work_hours(checkin_str, checkout_str):
+    try:
+        ci = datetime.datetime.strptime(checkin_str, "%H:%M:%S")
+        co = datetime.datetime.strptime(checkout_str, "%H:%M:%S")
+        if co <= ci:
+            co += datetime.timedelta(days=1)
+        delta = co - ci
+        return delta.total_seconds() / 3600.0
+    except:
+        return 0.0
+
 # ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.0")
+        self.root.title("Staff Attendance System v3.3")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -197,8 +252,8 @@ class AttendanceApp:
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
-                            f"Standard daily hours: {STANDARD_HOURS} hrs (±{GRACE_MINUTES} min grace)\n"
-                            "Select your shift after each scan.")
+                            f"Standard work hours: {STANDARD_HOURS} hrs (±{GRACE_MINUTES} min grace)\n"
+                            "Missing check-in/out will be marked in reports.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -230,7 +285,8 @@ class AttendanceApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Import Attendance", command=self.import_attendance).pack(side=tk.LEFT, padx=5)
+        # --- Removed "Import Attendance" button ---
+        # --- Removed "Import Roster" button ---
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
@@ -258,15 +314,14 @@ class AttendanceApp:
                 self.batch_var.set(self.current_batch)
                 att = get_today_attendance(staff_id)
                 if att:
-                    clock_on = att[0]
-                    clock_off = att[1]
-                    shift = f"{att[2]} - {att[3]}" if att[2] and att[3] else ""
-                    if clock_off:
-                        self.status_var.set(f"Clocked off at {clock_off} (Shift: {shift})")
+                    checkin_time = att[0]
+                    checkout_time = att[1]
+                    if checkout_time:
+                        self.status_var.set(f"Checked out at {checkout_time}")
                     else:
-                        self.status_var.set(f"Clocked on at {clock_on} (Shift: {shift})")
+                        self.status_var.set(f"Checked in at {checkin_time}")
                 else:
-                    self.status_var.set("Not clocked on today")
+                    self.status_var.set("Not checked in today")
             else:
                 self.current_name = None
                 self.current_batch = None
@@ -281,79 +336,113 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- Import Attendance (CSV/Excel) ----------
-    def import_attendance(self):
+    # ---------- Import Roster (Excel) ----------
+    def import_roster(self):
+        if not HAS_OPENPYXL:
+            messagebox.showerror("Error", "openpyxl is required for roster import. Please install: pip install openpyxl")
+            return
+
         file_path = filedialog.askopenfilename(
-            title="Select attendance file",
-            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx *.xls")]
+            title="Select roster Excel file",
+            filetypes=[("Excel files", "*.xlsx")]
         )
         if not file_path:
             return
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext == '.csv':
-            self.import_attendance_csv(file_path)
-        elif ext in ('.xlsx', '.xls'):
-            self.import_attendance_excel(file_path)
-        else:
-            messagebox.showerror("Error", "Unsupported format.")
 
-    def import_attendance_csv(self, file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                count = 0
-                for row in reader:
-                    if len(row) < 4:
-                        continue
-                    staff_id, date_str, clock_on, clock_off = row[0].strip(), row[1].strip(), row[2].strip(), row[3].strip()
-                    try:
-                        datetime.datetime.strptime(date_str, "%Y-%m-%d")
-                    except ValueError:
-                        self.log_message(f"Skipping invalid date: {date_str}")
-                        continue
-                    if not get_staff(staff_id):
-                        self.log_message(f"Staff {staff_id} not found, skipping.")
-                        continue
-                    upsert_attendance(staff_id, date_str, clock_on, clock_off)
-                    count += 1
-                self.log_message(f"Imported {count} attendance records.")
-                messagebox.showinfo("Success", f"Imported {count} records.")
-        except Exception as e:
-            messagebox.showerror("Error", f"CSV import failed: {str(e)}")
-
-    def import_attendance_excel(self, file_path):
-        if not HAS_OPENPYXL:
-            messagebox.showerror("Error", "openpyxl not installed. Please install: pip install openpyxl")
-            return
         try:
             wb = load_workbook(file_path, data_only=True)
             ws = wb.active
-            count = 0
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if row and len(row) >= 4:
-                    staff_id = str(row[0]).strip()
-                    date_str = str(row[1]).strip()
-                    clock_on = str(row[2]).strip() if row[2] else None
-                    clock_off = str(row[3]).strip() if row[3] else None
-                    if not staff_id or not date_str:
-                        continue
-                    try:
-                        datetime.datetime.strptime(date_str, "%Y-%m-%d")
-                    except ValueError:
-                        self.log_message(f"Skipping invalid date: {date_str}")
-                        continue
-                    if not get_staff(staff_id):
-                        self.log_message(f"Staff {staff_id} not found, skipping.")
-                        continue
-                    upsert_attendance(staff_id, date_str, clock_on, clock_off)
-                    count += 1
-            self.log_message(f"Imported {count} attendance records from Excel.")
-            messagebox.showinfo("Success", f"Imported {count} records.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Excel import failed: {str(e)}")
 
-    # ---------- Barcode Scan with Shift Selection ----------
+            date_row_idx = None
+            date_cols = []
+            for row_idx in range(1, min(15, ws.max_row + 1)):
+                row_values = [cell.value for cell in ws[row_idx]]
+                found = False
+                for col_idx, val in enumerate(row_values, start=1):
+                    if val and isinstance(val, str):
+                        parsed = self.parse_date(val)
+                        if parsed:
+                            date_cols.append((col_idx, parsed))
+                            found = True
+                if found:
+                    date_row_idx = row_idx
+                    break
+
+            if not date_cols:
+                messagebox.showerror("Error", "No date columns found in the first 15 rows.")
+                return
+
+            date_cols.sort(key=lambda x: x[0])
+            first_date_col = date_cols[0][0]
+            name_col = first_date_col - 1
+            if name_col < 1:
+                messagebox.showerror("Error", "Name column not found (must be before date columns).")
+                return
+
+            self.log_message(f"Detected date row: {date_row_idx}, name column: {name_col}, first date col: {first_date_col}")
+
+            inserted = 0
+            skipped = 0
+            for row_idx in range(date_row_idx + 1, ws.max_row + 1):
+                name_cell = ws.cell(row=row_idx, column=name_col)
+                name = str(name_cell.value).strip() if name_cell.value else None
+                if not name:
+                    continue
+
+                staff_id = get_staff_by_name(name)
+                if not staff_id:
+                    self.log_message(f"Staff '{name}' not found in database, skipping row {row_idx}")
+                    skipped += 1
+                    continue
+
+                for col_idx, date_str in date_cols:
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    shift_code = str(cell.value).strip() if cell.value else ""
+                    if not shift_code:
+                        continue
+                    if shift_code in SHIFT_MAP:
+                        times = SHIFT_MAP[shift_code]
+                        if times is None:
+                            continue
+                        work_start, work_end = times
+                        upsert_work_schedule(staff_id, date_str, date_str, work_start, work_end)
+                        inserted += 1
+                    else:
+                        self.log_message(f"Unknown shift code '{shift_code}' for {name} on {date_str}")
+
+            self.log_message(f"Roster import completed. Inserted {inserted} schedules, skipped {skipped} staff rows.")
+            messagebox.showinfo("Import Complete", f"Imported {inserted} work schedules from roster.\nSkipped {skipped} rows due to missing staff.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Roster import failed: {str(e)}")
+
+    def parse_date(self, date_str):
+        s = date_str.strip()
+        match = re.match(r'^(\d{1,2})-(\d{1,2})月$', s)
+        if match:
+            day = int(match.group(1))
+            month = int(match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                try:
+                    dt = datetime.date(CURRENT_YEAR, month, day)
+                    return dt.isoformat()
+                except ValueError:
+                    return None
+        match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', s)
+        if match:
+            day = int(match.group(1))
+            month = int(match.group(2))
+            year_short = int(match.group(3))
+            year = 2000 + year_short if year_short < 100 else year_short
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                try:
+                    dt = datetime.date(year, month, day)
+                    return dt.isoformat()
+                except ValueError:
+                    return None
+        return None
+
+    # ---------- Barcode Scan ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -378,101 +467,115 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        # Check today's attendance
-        today_record = get_today_attendance(staff_id)
+        att = get_today_attendance(staff_id)
         now = datetime.datetime.now().strftime("%H:%M:%S")
-
-        if today_record:
-            clock_on = today_record[0]
-            clock_off = today_record[1]
-            if clock_off:
-                # Already clocked off today
-                messagebox.showinfo("Already Clocked Off", f"{name} already clocked off at {clock_off} today.\nNo action taken.")
-                self.log_message(f"{name} already clocked off at {clock_off}")
-                return
+        if att:
+            checkin_time = att[0]
+            checkout_time = att[1]
+            if checkout_time:
+                action = "Check-in (override)"
+                action_key = "override"
             else:
-                # Clock off process: use existing shift, no need to select again
-                shift_start = today_record[2]
-                shift_end = today_record[3]
-                # Confirm clock off
-                if messagebox.askyesno("Clock Off", f"Clock off for {name} at {now}?\nShift: {shift_start} - {shift_end}"):
-                    set_clock_off(staff_id, now)
-                    work_hours = calculate_work_hours(clock_on, now)
-                    self.log_message(f"{name} clocked off at {now}. Worked {work_hours:.2f} hrs.")
-                    self.update_status(staff_id)
-                else:
-                    self.log_message("Clock off cancelled.")
-                return
+                action = "Check-out"
+                action_key = "checkout"
         else:
-            # No record today -> Clock on with shift selection
-            self.show_shift_selection(staff_id, name, batch, now)
+            action = "Check-in"
+            action_key = "checkin"
 
-    def show_shift_selection(self, staff_id, name, batch, current_time):
-        """Popup for shift selection, then clock on."""
-        win = tk.Toplevel(self.root)
-        win.title("Select Shift")
-        win.geometry("400x300")
-        win.transient(self.root)
-        win.grab_set()
-        win.focus_force()
+        self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-        ttk.Label(win, text=f"Staff: {name} ({staff_id})", font=("Arial", 12)).pack(pady=10)
-        ttk.Label(win, text="Select your working shift for today:").pack(pady=5)
+    def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Confirm Attendance")
+        dialog.geometry("400x280")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.focus_force()
 
-        # Determine recommended shift based on current time
-        now_time = datetime.datetime.strptime(current_time, "%H:%M:%S").time()
-        recommended_idx = 0
-        for idx, (label, start, end) in enumerate(SHIFT_OPTIONS):
-            start_time = datetime.datetime.strptime(start, "%H:%M").time()
-            end_time = datetime.datetime.strptime(end, "%H:%M").time()
-            # For night shift (start > end), we need to treat differently
-            if start_time > end_time:
-                # Night shift: if current time is between start and midnight, or between midnight and end
-                if now_time >= start_time or now_time <= end_time:
-                    recommended_idx = idx
-                    break
-            else:
-                # Normal shift: if current time is within 30 minutes of start
-                diff = abs((datetime.datetime.combine(datetime.date.today(), now_time) -
-                            datetime.datetime.combine(datetime.date.today(), start_time)).total_seconds() / 60)
-                if diff <= 30:
-                    recommended_idx = idx
-                    break
-        # If no match, default to first
+        self.barcode_entry.config(state=tk.DISABLED)
+        self.scan_btn.config(state=tk.DISABLED)
 
-        # ComboBox for shift selection
-        shift_display = [opt[0] for opt in SHIFT_OPTIONS]
-        selected_var = tk.StringVar(value=shift_display[recommended_idx])
-        combo = ttk.Combobox(win, textvariable=selected_var, values=shift_display, state="readonly", width=25)
-        combo.pack(pady=10)
+        self.confirm_dialog = dialog
+        self.countdown = 10
 
-        def confirm_shift():
-            selected_label = selected_var.get()
-            # Find selected shift
-            shift_start = None
-            shift_end = None
-            for label, start, end in SHIFT_OPTIONS:
-                if label == selected_label:
-                    shift_start = start
-                    shift_end = end
-                    break
-            if not shift_start or not shift_end:
-                messagebox.showerror("Error", "Invalid shift selection.")
-                return
-            # Record clock on
-            set_clock_on(staff_id, current_time, shift_start, shift_end)
-            self.log_message(f"{name} clocked on at {current_time} (Shift: {shift_start} - {shift_end})")
-            self.update_status(staff_id)
-            win.destroy()
+        ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
 
-        def cancel():
-            self.log_message("Shift selection cancelled.")
-            win.destroy()
+        ttk.Label(dialog, text="Batch:", font=("Arial", 12)).grid(row=1, column=0, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text=batch or "-", font=("Arial", 12)).grid(row=1, column=1, padx=10, pady=5, sticky=tk.W)
 
-        btn_frame = ttk.Frame(win)
-        btn_frame.pack(pady=20)
-        ttk.Button(btn_frame, text="Confirm", command=confirm_shift).pack(side=tk.LEFT, padx=10)
-        ttk.Button(btn_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=10)
+        ttk.Label(dialog, text="Current time:", font=("Arial", 12)).grid(row=2, column=0, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text=current_time, font=("Arial", 12, "bold")).grid(row=2, column=1, padx=10, pady=5, sticky=tk.W)
+
+        ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
+
+        self.countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {self.countdown} seconds", font=("Arial", 10))
+        self.countdown_label.grid(row=4, column=0, columnspan=2, pady=10)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
+
+        def reset_after_dialog():
+            self.barcode_entry.config(state=tk.NORMAL)
+            self.scan_btn.config(state=tk.NORMAL)
+            self.barcode_entry.focus_set()
+            self.confirm_dialog = None
+            if self.timer_id:
+                self.root.after_cancel(self.timer_id)
+                self.timer_id = None
+
+        def do_confirm():
+            if self.timer_id:
+                dialog.after_cancel(self.timer_id)
+                self.timer_id = None
+            self.perform_action(staff_id, action_key, current_time)
+            reset_after_dialog()
+            dialog.destroy()
+
+        def do_cancel():
+            if self.timer_id:
+                dialog.after_cancel(self.timer_id)
+                self.timer_id = None
+            self.log_message(f"Confirmation cancelled for {name}")
+            reset_after_dialog()
+            dialog.destroy()
+
+        confirm_btn = ttk.Button(btn_frame, text="Confirm", command=do_confirm, width=12)
+        confirm_btn.pack(side=tk.LEFT, padx=10)
+        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
+        cancel_btn.pack(side=tk.LEFT, padx=10)
+
+        self.update_countdown(dialog, staff_id, action_key, current_time, reset_after_dialog)
+        dialog.protocol("WM_DELETE_WINDOW", do_cancel)
+
+    def update_countdown(self, dialog, staff_id, action_key, current_time, reset_callback):
+        if self.countdown <= 0:
+            if self.timer_id:
+                self.timer_id = None
+            self.perform_action(staff_id, action_key, current_time)
+            reset_callback()
+            dialog.destroy()
+            return
+
+        self.countdown_label.config(text=f"Auto‑confirm in {self.countdown} seconds")
+        self.countdown -= 1
+        self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time, reset_callback)
+
+    def perform_action(self, staff_id, action_key, time_str):
+        if action_key == "checkin":
+            set_checkin(staff_id, time_str)
+            self.log_message(f"Checked in at {time_str}")
+        elif action_key == "checkout":
+            set_checkout(staff_id, time_str)
+            self.log_message(f"Checked out at {time_str}")
+        elif action_key == "override":
+            override_checkin(staff_id, time_str)
+            self.log_message(f"Overrode check‑in at {time_str} (previous checkout cleared)")
+        else:
+            self.log_message("Unknown action – nothing stored")
+            return
+        self.update_status(staff_id)
 
     # ---------- Staff Management ----------
     def manage_staff(self):
@@ -558,6 +661,7 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
+    # ---------- Add New Staff ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
@@ -573,7 +677,7 @@ class AttendanceApp:
                 messagebox.showerror("Error", "Staff ID already exists.")
             conn.close()
 
-    # ---------- Monthly Exception Report (using clock_on/off and shift) ----------
+    # ---------- Monthly Exception Report ----------
     def show_monthly_summary(self):
         win = tk.Toplevel(self.root)
         win.title("Monthly Exception Report")
@@ -618,46 +722,49 @@ class AttendanceApp:
             exceptions = {}
 
             for staff_id, name, batch in all_staff:
-                # Get attendance records for the month
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute('''
-                    SELECT date, clock_on, clock_off, shift_start, shift_end
+                    SELECT date, checkin, checkout
                     FROM attendance
                     WHERE staff_id=? AND date >= ? AND date < ?
                 ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
-                records = {row[0]: (row[1], row[2], row[3], row[4]) for row in c.fetchall()}
+                records = {row[0]: (row[1], row[2]) for row in c.fetchall()}
                 conn.close()
 
                 for date_str in all_dates:
-                    if date_str in records:
-                        clock_on, clock_off, shift_start, shift_end = records[date_str]
-                        if clock_on and not clock_off:
-                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                            exceptions[staff_id]['days'].append((date_str, "No Clock-off Record", f"Clocked-on: {clock_on}"))
-                        elif not clock_on and clock_off:
-                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                            exceptions[staff_id]['days'].append((date_str, "No Clock-on Record", f"Clocked-off: {clock_off}"))
-                        else:
-                            # Both present -> check late/early leave based on shift
-                            if shift_start and shift_end:
-                                try:
-                                    ci = datetime.datetime.strptime(clock_on, "%H:%M:%S").time()
-                                    co = datetime.datetime.strptime(clock_off, "%H:%M:%S").time()
-                                    ws = datetime.datetime.strptime(shift_start, "%H:%M").time()
-                                    we = datetime.datetime.strptime(shift_end, "%H:%M").time()
-                                    if ci > ws:
-                                        exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                                        exceptions[staff_id]['days'].append((date_str, "Late", f"Clocked-on: {clock_on} (Shift start: {shift_start})"))
-                                    if co < we:
-                                        exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                                        exceptions[staff_id]['days'].append((date_str, "Early Leave", f"Clocked-off: {clock_off} (Shift end: {shift_end})"))
-                                except:
-                                    pass
+                    schedule = get_work_schedule_for_date(staff_id, date_str)
+                    if schedule:
+                        work_start, work_end = schedule
                     else:
-                        # No record at all -> Forgot Clock
-                        exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                        exceptions[staff_id]['days'].append((date_str, "Forgot Clock", "No clock-on/off recorded"))
+                        work_start, work_end = WORK_START, WORK_END
+
+                    if date_str in records:
+                        checkin, checkout = records[date_str]
+                        if checkin and not checkout:
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "No Checkout Record", f"Checkin: {checkin}"))
+                        elif not checkin and checkout:
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "No Checkin Record", f"Checkout: {checkout}"))
+                        else:
+                            try:
+                                ci = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
+                                co = datetime.datetime.strptime(checkout, "%H:%M:%S").time()
+                                ws = datetime.datetime.strptime(work_start, "%H:%M:%S").time()
+                                we = datetime.datetime.strptime(work_end, "%H:%M:%S").time()
+                                if ci > ws:
+                                    exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                                    exceptions[staff_id]['days'].append((date_str, "Late", f"Checkin: {checkin} (Start: {work_start})"))
+                                if co < we:
+                                    exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                                    exceptions[staff_id]['days'].append((date_str, "Early Leave", f"Checkout: {checkout} (End: {work_end})"))
+                            except:
+                                pass
+                    else:
+                        if schedule:
+                            exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
+                            exceptions[staff_id]['days'].append((date_str, "Forgot Check", "No check-in/out recorded"))
 
             if not exceptions:
                 messagebox.showinfo("All Good", "No exceptions found for this month.")
@@ -703,7 +810,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report (with shift and 8.8 threshold) ----------
+    # ---------- Full Monthly Report ----------
     def export_full_monthly_report(self):
         win = tk.Toplevel(self.root)
         win.title("Full Monthly Report")
@@ -747,63 +854,64 @@ class AttendanceApp:
             report_data = []
 
             for staff_id, name, batch in all_staff:
-                # Get attendance records
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute('''
-                    SELECT date, clock_on, clock_off, shift_start, shift_end
+                    SELECT date, checkin, checkout
                     FROM attendance
                     WHERE staff_id=? AND date >= ? AND date < ?
                 ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
-                records = {row[0]: (row[1], row[2], row[3], row[4]) for row in c.fetchall()}
+                records = {row[0]: (row[1], row[2]) for row in c.fetchall()}
                 conn.close()
 
                 for date_str in all_dates:
+                    schedule = get_work_schedule_for_date(staff_id, date_str)
+                    if schedule:
+                        work_start, work_end = schedule
+                    else:
+                        work_start, work_end = WORK_START, WORK_END
+
                     if date_str in records:
-                        clock_on, clock_off, shift_start, shift_end = records[date_str]
-                        if clock_on and clock_off:
-                            work_hrs = calculate_work_hours(clock_on, clock_off)
+                        checkin, checkout = records[date_str]
+                        if checkin and checkout:
+                            work_hrs = calculate_work_hours(checkin, checkout)
                             if abs(work_hrs - STANDARD_HOURS) <= GRACE_HOURS:
                                 status = "Normal"
                             elif work_hrs < STANDARD_HOURS - GRACE_HOURS:
                                 status = "Early Leave"
                             else:
                                 status = "Overtime"
-                            shift_info = f"{shift_start} - {shift_end}" if shift_start and shift_end else "N/A"
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "Clock On": clock_on,
-                                "Clock Off": clock_off,
-                                "Shift": shift_info,
+                                "Checkin": checkin,
+                                "Checkout": checkout,
                                 "Work Hours": f"{work_hrs:.2f}",
                                 "Status": status
                             })
-                        elif clock_on and not clock_off:
+                        elif checkin and not checkout:
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "Clock On": clock_on,
-                                "Clock Off": "",
-                                "Shift": f"{shift_start} - {shift_end}" if shift_start and shift_end else "N/A",
+                                "Checkin": checkin,
+                                "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "No Clock-off Record"
+                                "Status": "No Checkout Record"
                             })
-                        elif not clock_on and clock_off:
+                        elif not checkin and checkout:
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "Clock On": "",
-                                "Clock Off": clock_off,
-                                "Shift": f"{shift_start} - {shift_end}" if shift_start and shift_end else "N/A",
+                                "Checkin": "",
+                                "Checkout": checkout,
                                 "Work Hours": "0.00",
-                                "Status": "No Clock-on Record"
+                                "Status": "No Checkin Record"
                             })
                         else:
                             report_data.append({
@@ -811,24 +919,34 @@ class AttendanceApp:
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "Clock On": "",
-                                "Clock Off": "",
-                                "Shift": "",
+                                "Checkin": "",
+                                "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "Forgot Clock"
+                                "Status": "Forgot Check"
                             })
                     else:
-                        report_data.append({
-                            "Staff ID": staff_id,
-                            "Name": name,
-                            "Batch": batch or "",
-                            "Date": date_str,
-                            "Clock On": "",
-                            "Clock Off": "",
-                            "Shift": "",
-                            "Work Hours": "0.00",
-                            "Status": "Forgot Clock"
-                        })
+                        if schedule:
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "Forgot Check"
+                            })
+                        else:
+                            report_data.append({
+                                "Staff ID": staff_id,
+                                "Name": name,
+                                "Batch": batch or "",
+                                "Date": date_str,
+                                "Checkin": "",
+                                "Checkout": "",
+                                "Work Hours": "0.00",
+                                "Status": "Off Day"
+                            })
 
             if not report_data:
                 messagebox.showinfo("No Data", "No data to export.")
@@ -843,7 +961,7 @@ class AttendanceApp:
                 return
 
             with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=["Staff ID", "Name", "Batch", "Date", "Clock On", "Clock Off", "Shift", "Work Hours", "Status"])
+                writer = csv.DictWriter(f, fieldnames=["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", "Work Hours", "Status"])
                 writer.writeheader()
                 writer.writerows(report_data)
 
