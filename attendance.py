@@ -1,8 +1,9 @@
 """
-Staff Duty Attendance System v3.4
-- Enlarged barcode entry field with bigger font.
-- Removed 5-minute grace period (exact 8.8 hrs threshold).
-- Shift codes included in time display format (for internal reference).
+Staff Duty Attendance System v3.6
+- Enlarged barcode entry with bigger font.
+- Removed 5-minute grace period (exact 8.8 hrs).
+- Added Shift Code Reference window.
+- In confirmation dialog, if no schedule for today, show shift selection combobox.
 """
 
 import sqlite3
@@ -25,35 +26,35 @@ WORK_START = "09:00:00"
 WORK_END   = "18:00:00"
 CURRENT_YEAR = datetime.date.today().year
 STANDARD_HOURS = 8.8
-GRACE_MINUTES = 0          # 移除宽限期
+GRACE_MINUTES = 0
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Code Mapping (with code prefix for clarity) ----------
+# ---------- Shift Code Mapping ----------
 SHIFT_MAP = {
-    "MD":   ("08:00", "16:48"),     # MD: 08:00-16:48
-    "D8":   ("08:00", "16:48"),     # D8: 08:00-16:48
-    "R8":   ("08:00", "16:48"),     # R8: 08:00-16:48
-    "D/SD": ("09:00", "17:48"),     # D/SD: 09:00-17:48
-    "R10":  ("10:00", "18:48"),     # R10: 10:00-18:48
-    "P":    ("13:00", "21:48"),     # P: 13:00-21:48
-    "N":    ("21:30", "08:30"),     # N: 21:30-08:30
-    "W":    ("08:30", "17:18"),     # W: 08:30-17:18
-    "AA1":  ("09:00", "18:00"),     # AA1: 09:00-18:00
-    "AA2":  ("09:00", "17:00"),     # AA2: 09:00-17:00
-    "D4":   ("08:00", "16:48"),     # D4: 08:00-16:48
-    "D1":   ("08:00", "16:48"),     # D1: 08:00-16:48
-    "D3":   ("08:00", "16:48"),     # D3: 08:00-16:48
-    "D5":   ("08:00", "16:48"),     # D5: 08:00-16:48
-    "D6":   ("08:00", "16:48"),     # D6: 08:00-16:48
-    "MD1":  ("08:00", "16:48"),     # MD1: 08:00-16:48
-    "MD2":  ("08:00", "16:48"),     # MD2: 08:00-16:48
-    "MD3":  ("08:00", "16:48"),     # MD3: 08:00-16:48
-    "MD4":  ("08:00", "16:48"),     # MD4: 08:00-16:48
-    "MD5":  ("08:00", "16:48"),     # MD5: 08:00-16:48
-    "SD":   ("09:00", "17:48"),     # SD: 09:00-17:48
-    "PH":   ("09:00", "17:48"),     # PH: 09:00-17:48
-    "Ag/gP": ("13:00", "21:48"),    # Ag/gP: 13:00-21:48
-    "Ag2/gP2": ("13:00", "21:48"),  # Ag2/gP2: 13:00-21:48
+    "MD":   ("08:00", "16:48"),
+    "D8":   ("08:00", "16:48"),
+    "R8":   ("08:00", "16:48"),
+    "D/SD": ("09:00", "17:48"),
+    "R10":  ("10:00", "18:48"),
+    "P":    ("13:00", "21:48"),
+    "N":    ("21:30", "08:30"),
+    "W":    ("08:30", "17:18"),
+    "AA1":  ("09:00", "18:00"),
+    "AA2":  ("09:00", "17:00"),
+    "D4":   ("08:00", "16:48"),
+    "D1":   ("08:00", "16:48"),
+    "D3":   ("08:00", "16:48"),
+    "D5":   ("08:00", "16:48"),
+    "D6":   ("08:00", "16:48"),
+    "MD1":  ("08:00", "16:48"),
+    "MD2":  ("08:00", "16:48"),
+    "MD3":  ("08:00", "16:48"),
+    "MD4":  ("08:00", "16:48"),
+    "MD5":  ("08:00", "16:48"),
+    "SD":   ("09:00", "17:48"),
+    "PH":   ("09:00", "17:48"),
+    "Ag/gP": ("13:00", "21:48"),
+    "Ag2/gP2": ("13:00", "21:48"),
     # Off/Leave codes (no schedule)
     "O":    None,
     "AL":   None,
@@ -63,7 +64,7 @@ SHIFT_MAP = {
     "AA2/ PM SL": None,
 }
 
-# ---------- Database Path: Always next to .exe ----------
+# ---------- Database Path ----------
 def get_db_path():
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
@@ -238,7 +239,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.4")
+        self.root.title("Staff Attendance System v3.6")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -262,7 +263,6 @@ class AttendanceApp:
         top_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(top_frame, text="Scan / Enter Staff ID:", font=("Arial", 12)).grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        # 放大输入框，增加字体
         self.barcode_entry = ttk.Entry(top_frame, width=40, font=("Arial", 14))
         self.barcode_entry.grid(row=0, column=1, padx=5, pady=5)
         self.barcode_entry.focus_set()
@@ -289,6 +289,7 @@ class AttendanceApp:
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Import Roster (Excel)", command=self.import_roster).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Shift Code Reference", command=self.show_shift_reference).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
@@ -337,6 +338,30 @@ class AttendanceApp:
             self.name_var.set("")
             self.batch_var.set("")
             self.status_var.set("Ready")
+
+    # ---------- Shift Code Reference Window ----------
+    def show_shift_reference(self):
+        win = tk.Toplevel(self.root)
+        win.title("Shift Code Reference")
+        win.geometry("500x400")
+
+        tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
+        tree.heading("Code", text="Shift Code")
+        tree.heading("Start", text="Start Time")
+        tree.heading("End", text="End Time")
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        for code, times in SHIFT_MAP.items():
+            if times is not None:
+                start, end = times
+                tree.insert("", tk.END, values=(code, start, end))
+
+        rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
+        if rest_codes:
+            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}", 
+                      font=("Arial", 10), foreground="gray").pack(pady=5)
+
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
 
     # ---------- Import Roster ----------
     def import_roster(self):
@@ -444,7 +469,7 @@ class AttendanceApp:
                     return None
         return None
 
-    # ---------- Barcode Scan ----------
+    # ---------- Barcode Scan (modified) ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -489,7 +514,7 @@ class AttendanceApp:
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("400x280")
+        dialog.geometry("450x350")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.focus_force()
@@ -500,6 +525,7 @@ class AttendanceApp:
         self.confirm_dialog = dialog
         self.countdown = 10
 
+        # Staff info
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
         ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
 
@@ -512,11 +538,62 @@ class AttendanceApp:
         ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=5, sticky=tk.W)
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
 
-        self.countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {self.countdown} seconds", font=("Arial", 10))
-        self.countdown_label.grid(row=4, column=0, columnspan=2, pady=10)
+        # Check if schedule exists for today
+        today = datetime.date.today().isoformat()
+        existing_schedule = get_work_schedule_for_date(staff_id, today)
 
+        shift_var = tk.StringVar()
+        if existing_schedule:
+            # Show existing schedule info
+            start, end = existing_schedule
+            # Try to find the shift code
+            code = None
+            for c, times in SHIFT_MAP.items():
+                if times and times[0] == start and times[1] == end:
+                    code = c
+                    break
+            if code:
+                display_text = f"已有排班: {code} ({start} - {end})"
+            else:
+                display_text = f"已有排班: {start} - {end}"
+            ttk.Label(dialog, text="Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=10, pady=5, sticky=tk.W)
+            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=10, pady=5, sticky=tk.W)
+            shift_var.set("")
+        else:
+            # No schedule: show dropdown
+            ttk.Label(dialog, text="Select Shift (optional):", font=("Arial", 12)).grid(row=4, column=0, padx=10, pady=5, sticky=tk.W)
+            # Build list of shifts with code: start-end
+            shift_list = []
+            for code, times in SHIFT_MAP.items():
+                if times is not None:
+                    start, end = times
+                    shift_list.append(f"{code}: {start} - {end}")
+            if shift_list:
+                combo = ttk.Combobox(dialog, values=shift_list, width=30, font=("Arial", 10))
+                combo.grid(row=4, column=1, padx=10, pady=5)
+                combo.current(0)
+                shift_var.set(combo.get())
+                # Store the selected shift code for later use
+                def on_select(event):
+                    selected = combo.get()
+                    # Extract code (before first ':')
+                    code = selected.split(':')[0].strip()
+                    shift_var.set(code)
+                combo.bind("<<ComboboxSelected>>", on_select)
+                # Also store code in variable when manually entered? We'll just use the full string.
+                # We'll parse code from combo.get() in perform_action.
+                # Store reference to combo for later
+                self.shift_combo = combo
+            else:
+                ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=10, pady=5)
+
+        # Countdown
+        self.countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {self.countdown} seconds", font=("Arial", 10))
+        self.countdown_label.grid(row=5, column=0, columnspan=2, pady=10)
+
+        # Buttons
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=15)
 
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
@@ -531,7 +608,16 @@ class AttendanceApp:
             if self.timer_id:
                 dialog.after_cancel(self.timer_id)
                 self.timer_id = None
-            self.perform_action(staff_id, action_key, current_time)
+            # Get selected shift code if any
+            selected_shift = None
+            if hasattr(self, 'shift_combo'):
+                selected_text = self.shift_combo.get()
+                if selected_text:
+                    # Extract code
+                    code = selected_text.split(':')[0].strip()
+                    selected_shift = code
+            # Perform action with optional shift
+            self.perform_action(staff_id, action_key, current_time, selected_shift)
             reset_after_dialog()
             dialog.destroy()
 
@@ -548,23 +634,33 @@ class AttendanceApp:
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
         cancel_btn.pack(side=tk.LEFT, padx=10)
 
-        self.update_countdown(dialog, staff_id, action_key, current_time, reset_after_dialog)
+        self.update_countdown(dialog, staff_id, action_key, current_time, selected_shift if 'selected_shift' in locals() else None, reset_after_dialog)
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    def update_countdown(self, dialog, staff_id, action_key, current_time, reset_callback):
+    def update_countdown(self, dialog, staff_id, action_key, current_time, selected_shift, reset_callback):
         if self.countdown <= 0:
             if self.timer_id:
                 self.timer_id = None
-            self.perform_action(staff_id, action_key, current_time)
+            self.perform_action(staff_id, action_key, current_time, selected_shift)
             reset_callback()
             dialog.destroy()
             return
 
         self.countdown_label.config(text=f"Auto‑confirm in {self.countdown} seconds")
         self.countdown -= 1
-        self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time, reset_callback)
+        self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time, selected_shift, reset_callback)
 
-    def perform_action(self, staff_id, action_key, time_str):
+    def perform_action(self, staff_id, action_key, time_str, selected_shift=None):
+        # If selected_shift provided and no schedule exists for today, write schedule
+        today = datetime.date.today().isoformat()
+        if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
+            existing = get_work_schedule_for_date(staff_id, today)
+            if not existing:
+                start, end = SHIFT_MAP[selected_shift]
+                upsert_work_schedule(staff_id, today, today, start, end)
+                self.log_message(f"Assigned shift {selected_shift} ({start}-{end}) for today")
+
+        # Perform checkin/checkout
         if action_key == "checkin":
             set_checkin(staff_id, time_str)
             self.log_message(f"Checked in at {time_str}")
@@ -699,7 +795,6 @@ class AttendanceApp:
                 messagebox.showerror("Error", "Invalid date format. Use YYYY-MM")
                 return
 
-            # Get all staff
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("SELECT staff_id, name, batch FROM staff ORDER BY name")
