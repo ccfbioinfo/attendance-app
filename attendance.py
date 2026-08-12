@@ -1,7 +1,8 @@
 """
-Staff Duty Attendance System v3.3
-- Removed "Import Attendance" function.
-- Kept: barcode scan, roster import, monthly exception report, full monthly report.
+Staff Duty Attendance System v3.4
+- Enlarged barcode entry field with bigger font.
+- Removed 5-minute grace period (exact 8.8 hrs threshold).
+- Shift codes included in time display format (for internal reference).
 """
 
 import sqlite3
@@ -24,35 +25,36 @@ WORK_START = "09:00:00"
 WORK_END   = "18:00:00"
 CURRENT_YEAR = datetime.date.today().year
 STANDARD_HOURS = 8.8
-GRACE_MINUTES = 5
+GRACE_MINUTES = 0          # 移除宽限期
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Code Mapping ----------
+# ---------- Shift Code Mapping (with code prefix for clarity) ----------
 SHIFT_MAP = {
-    "MD":   ("08:00", "16:48"),
-    "D8":   ("08:00", "16:48"),
-    "R8":   ("08:00", "16:48"),
-    "D/SD": ("09:00", "17:48"),
-    "R10":  ("10:00", "18:48"),
-    "P":    ("13:00", "21:48"),
-    "N":    ("21:30", "08:30"),
-    "W":    ("08:30", "17:18"),
-    "AA1":  ("09:00", "18:00"),
-    "AA2":  ("09:00", "17:00"),
-    "D4":   ("08:00", "16:48"),
-    "D1":   ("08:00", "16:48"),
-    "D3":   ("08:00", "16:48"),
-    "D5":   ("08:00", "16:48"),
-    "D6":   ("08:00", "16:48"),
-    "MD1":  ("08:00", "16:48"),
-    "MD2":  ("08:00", "16:48"),
-    "MD3":  ("08:00", "16:48"),
-    "MD4":  ("08:00", "16:48"),
-    "MD5":  ("08:00", "16:48"),
-    "SD":   ("09:00", "17:48"),
-    "PH":   ("09:00", "17:48"),
-    "Ag/gP": ("13:00", "21:48"),
-    "Ag2/gP2": ("13:00", "21:48"),
+    "MD":   ("08:00", "16:48"),     # MD: 08:00-16:48
+    "D8":   ("08:00", "16:48"),     # D8: 08:00-16:48
+    "R8":   ("08:00", "16:48"),     # R8: 08:00-16:48
+    "D/SD": ("09:00", "17:48"),     # D/SD: 09:00-17:48
+    "R10":  ("10:00", "18:48"),     # R10: 10:00-18:48
+    "P":    ("13:00", "21:48"),     # P: 13:00-21:48
+    "N":    ("21:30", "08:30"),     # N: 21:30-08:30
+    "W":    ("08:30", "17:18"),     # W: 08:30-17:18
+    "AA1":  ("09:00", "18:00"),     # AA1: 09:00-18:00
+    "AA2":  ("09:00", "17:00"),     # AA2: 09:00-17:00
+    "D4":   ("08:00", "16:48"),     # D4: 08:00-16:48
+    "D1":   ("08:00", "16:48"),     # D1: 08:00-16:48
+    "D3":   ("08:00", "16:48"),     # D3: 08:00-16:48
+    "D5":   ("08:00", "16:48"),     # D5: 08:00-16:48
+    "D6":   ("08:00", "16:48"),     # D6: 08:00-16:48
+    "MD1":  ("08:00", "16:48"),     # MD1: 08:00-16:48
+    "MD2":  ("08:00", "16:48"),     # MD2: 08:00-16:48
+    "MD3":  ("08:00", "16:48"),     # MD3: 08:00-16:48
+    "MD4":  ("08:00", "16:48"),     # MD4: 08:00-16:48
+    "MD5":  ("08:00", "16:48"),     # MD5: 08:00-16:48
+    "SD":   ("09:00", "17:48"),     # SD: 09:00-17:48
+    "PH":   ("09:00", "17:48"),     # PH: 09:00-17:48
+    "Ag/gP": ("13:00", "21:48"),    # Ag/gP: 13:00-21:48
+    "Ag2/gP2": ("13:00", "21:48"),  # Ag2/gP2: 13:00-21:48
+    # Off/Leave codes (no schedule)
     "O":    None,
     "AL":   None,
     "SL":   None,
@@ -236,7 +238,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.3")
+        self.root.title("Staff Attendance System v3.4")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -252,15 +254,16 @@ class AttendanceApp:
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
-                            f"Standard work hours: {STANDARD_HOURS} hrs (±{GRACE_MINUTES} min grace)\n"
+                            f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
                             "Missing check-in/out will be marked in reports.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
         top_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        ttk.Label(top_frame, text="Scan / Enter Staff ID:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        self.barcode_entry = ttk.Entry(top_frame, width=30)
+        ttk.Label(top_frame, text="Scan / Enter Staff ID:", font=("Arial", 12)).grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        # 放大输入框，增加字体
+        self.barcode_entry = ttk.Entry(top_frame, width=40, font=("Arial", 14))
         self.barcode_entry.grid(row=0, column=1, padx=5, pady=5)
         self.barcode_entry.focus_set()
 
@@ -285,8 +288,7 @@ class AttendanceApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
-        # --- Removed "Import Attendance" button ---
-        # --- Removed "Import Roster" button ---
+        ttk.Button(btn_frame, text="Import Roster (Excel)", command=self.import_roster).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
@@ -336,7 +338,7 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- Import Roster (Excel) ----------
+    # ---------- Import Roster ----------
     def import_roster(self):
         if not HAS_OPENPYXL:
             messagebox.showerror("Error", "openpyxl is required for roster import. Please install: pip install openpyxl")
