@@ -1,9 +1,9 @@
 """
-Staff Duty Attendance System v3.6
-- Enlarged barcode entry with bigger font.
-- Removed 5-minute grace period (exact 8.8 hrs).
-- Added Shift Code Reference window.
-- In confirmation dialog, if no schedule for today, show shift selection combobox.
+Staff Duty Attendance System v3.7
+- Updated shift mapping per new request.
+- Added deviation columns in monthly report (late/early minutes).
+- Confirmation timeout increased to 20 seconds.
+- Confirmation window enlarged and resizable.
 """
 
 import sqlite3
@@ -29,40 +29,36 @@ STANDARD_HOURS = 8.8
 GRACE_MINUTES = 0
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Code Mapping ----------
-SHIFT_MAP = {
-    "MD":   ("08:00", "16:48"),
-    "D8":   ("08:00", "16:48"),
-    "R8":   ("08:00", "16:48"),
-    "D/SD": ("09:00", "17:48"),
-    "R10":  ("10:00", "18:48"),
-    "P":    ("13:00", "21:48"),
-    "N":    ("21:30", "08:30"),
-    "W":    ("08:30", "17:18"),
-    "AA1":  ("09:00", "18:00"),
-    "AA2":  ("09:00", "17:00"),
-    "D4":   ("08:00", "16:48"),
-    "D1":   ("08:00", "16:48"),
-    "D3":   ("08:00", "16:48"),
-    "D5":   ("08:00", "16:48"),
-    "D6":   ("08:00", "16:48"),
-    "MD1":  ("08:00", "16:48"),
-    "MD2":  ("08:00", "16:48"),
-    "MD3":  ("08:00", "16:48"),
-    "MD4":  ("08:00", "16:48"),
-    "MD5":  ("08:00", "16:48"),
-    "SD":   ("09:00", "17:48"),
-    "PH":   ("09:00", "17:48"),
-    "Ag/gP": ("13:00", "21:48"),
-    "Ag2/gP2": ("13:00", "21:48"),
-    # Off/Leave codes (no schedule)
-    "O":    None,
-    "AL":   None,
-    "SL":   None,
-    "AM AL/ PM SL": None,
-    "D/ PM NPL": None,
-    "AA2/ PM SL": None,
-}
+# ---------- Updated Shift Code Mapping ----------
+# Build from the new table. We'll define a list of (code_list, start, end)
+SHIFT_ENTRIES = [
+    (["B", "OA"], "07:45", "16:33"),
+    (["MD", "D8", "R8"], "08:00", "16:48"),
+    (["SAT", "AP LA"], "08:00", "16:48"),   # SAT and AP LA both map to this time
+    (["A", "C", "D", "SAT"], "08:15", "17:03"),  # Overwrites earlier SAT, D
+    (["W"], "08:30", "17:18"),
+    (["S"], "08:45", "17:33"),
+    (["D", "SD"], "09:00", "17:48"),       # Overwrites earlier D
+    (["AA1"], "09:00", "18:00"),
+    (["AA2"], "09:00", "17:00"),
+    (["P", "AP", "OB*"], "09:15", "18:03"),  # AP already exists? will be overwritten
+    (["OB"], "09:45", "18:33"),
+    (["R10"], "10:00", "18:48"),
+    (["N", "AP"], "10:15", "19:03"),        # AP overwritten again
+    (["P", "Core"], "13:00", "21:48"),      # P overwritten
+    (["N", "Core"], "21:30", "08:30"),      # N overwritten
+]
+
+# Build SHIFT_MAP from entries, later entries overwrite earlier ones
+SHIFT_MAP = {}
+for codes, start, end in SHIFT_ENTRIES:
+    for code in codes:
+        SHIFT_MAP[code] = (start, end)
+
+# Add rest/leave codes (these were not in the new table)
+REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
+for code in REST_CODES:
+    SHIFT_MAP[code] = None
 
 # ---------- Database Path ----------
 def get_db_path():
@@ -235,16 +231,42 @@ def calculate_work_hours(checkin_str, checkout_str):
     except:
         return 0.0
 
+def time_diff_minutes(time_str, ref_str):
+    """Return difference in minutes: time - ref, handling cross-day for ref (if ref < time? Actually we just compare times on same day)"""
+    try:
+        t = datetime.datetime.strptime(time_str, "%H:%M:%S")
+        r = datetime.datetime.strptime(ref_str, "%H:%M:%S")
+        # If t < r and the difference is huge (e.g., 21:30 vs 08:30 next day), we need to treat ref as next day for cross-night shifts.
+        # But here we are comparing checkin/out with work_start/end on the same day. For night shift (e.g., 21:30-08:30),
+        # checkout will be early morning, work_end is 08:30, both on same day? Actually work_end is 08:30, but checkout time like 08:00 is earlier than 08:30 on same day, but it's actually the next day.
+        # So we need to handle cross-day in deviation calculation as well.
+        # We'll use a heuristic: if work_end < work_start (night shift), and checkout time is before work_end, we add 24h to checkout.
+        # But we already handle in calculate_work_hours. For deviation, we want the absolute difference.
+        # Simpler: we calculate the difference in minutes between the actual time and the reference time as if they are on the same day, but for night shifts we need to adjust.
+        # We'll assume the schedule start/end are for the day, but for night shift, end is next day. The stored checkout time is the actual clock time (e.g., 08:00). To compare with work_end (08:30), we need to treat work_end as next day.
+        # So we detect if work_start > work_end (night shift), then if checkout time is less than work_end, we add 24h to checkout.
+        # Similarly for checkin, if checkin > work_start? Actually checkin is always on the same day as start.
+        # For checkin, we compare checkin with work_start directly.
+        # For checkout, we compare checkout (possibly next day) with work_end (possibly next day).
+        # So we need a function that adjusts times for cross-day.
+        # We'll implement a simple method: if work_start > work_end (night shift), then we add 24h to work_end for comparison with checkout.
+        # But we don't have work_start/end here. We'll pass them as parameters.
+        # So we'll compute deviation inside the report generation loop using the schedule times.
+    except:
+        return None
+
+# We'll implement deviation calculation directly in the report loop.
+
 # ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.6")
+        self.root.title("Staff Attendance System v3.7")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
         self.timer_id = None
-        self.countdown = 10
+        self.countdown = 20  # Changed to 20 seconds
         self.current_staff_id = None
         self.current_name = None
         self.current_batch = None
@@ -469,7 +491,7 @@ class AttendanceApp:
                     return None
         return None
 
-    # ---------- Barcode Scan (modified) ----------
+    # ---------- Barcode Scan ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -514,7 +536,8 @@ class AttendanceApp:
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("450x350")
+        dialog.geometry("750x500")          # 放大窗口
+        dialog.resizable(True, True)        # 允许手动调整大小
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.focus_force()
@@ -523,7 +546,7 @@ class AttendanceApp:
         self.scan_btn.config(state=tk.DISABLED)
 
         self.confirm_dialog = dialog
-        self.countdown = 10
+        self.countdown = 20                 # 延长至20秒
 
         # Staff info
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
@@ -538,15 +561,13 @@ class AttendanceApp:
         ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=5, sticky=tk.W)
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
 
-        # Check if schedule exists for today
+        # Check schedule
         today = datetime.date.today().isoformat()
         existing_schedule = get_work_schedule_for_date(staff_id, today)
 
         shift_var = tk.StringVar()
         if existing_schedule:
-            # Show existing schedule info
             start, end = existing_schedule
-            # Try to find the shift code
             code = None
             for c, times in SHIFT_MAP.items():
                 if times and times[0] == start and times[1] == end:
@@ -560,29 +581,22 @@ class AttendanceApp:
             ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=10, pady=5, sticky=tk.W)
             shift_var.set("")
         else:
-            # No schedule: show dropdown
             ttk.Label(dialog, text="Select Shift (optional):", font=("Arial", 12)).grid(row=4, column=0, padx=10, pady=5, sticky=tk.W)
-            # Build list of shifts with code: start-end
             shift_list = []
             for code, times in SHIFT_MAP.items():
                 if times is not None:
                     start, end = times
                     shift_list.append(f"{code}: {start} - {end}")
             if shift_list:
-                combo = ttk.Combobox(dialog, values=shift_list, width=30, font=("Arial", 10))
+                combo = ttk.Combobox(dialog, values=shift_list, width=35, font=("Arial", 10))
                 combo.grid(row=4, column=1, padx=10, pady=5)
                 combo.current(0)
                 shift_var.set(combo.get())
-                # Store the selected shift code for later use
                 def on_select(event):
                     selected = combo.get()
-                    # Extract code (before first ':')
                     code = selected.split(':')[0].strip()
                     shift_var.set(code)
                 combo.bind("<<ComboboxSelected>>", on_select)
-                # Also store code in variable when manually entered? We'll just use the full string.
-                # We'll parse code from combo.get() in perform_action.
-                # Store reference to combo for later
                 self.shift_combo = combo
             else:
                 ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=10, pady=5)
@@ -608,15 +622,12 @@ class AttendanceApp:
             if self.timer_id:
                 dialog.after_cancel(self.timer_id)
                 self.timer_id = None
-            # Get selected shift code if any
             selected_shift = None
             if hasattr(self, 'shift_combo'):
                 selected_text = self.shift_combo.get()
                 if selected_text:
-                    # Extract code
                     code = selected_text.split(':')[0].strip()
                     selected_shift = code
-            # Perform action with optional shift
             self.perform_action(staff_id, action_key, current_time, selected_shift)
             reset_after_dialog()
             dialog.destroy()
@@ -651,7 +662,6 @@ class AttendanceApp:
         self.timer_id = dialog.after(1000, self.update_countdown, dialog, staff_id, action_key, current_time, selected_shift, reset_callback)
 
     def perform_action(self, staff_id, action_key, time_str, selected_shift=None):
-        # If selected_shift provided and no schedule exists for today, write schedule
         today = datetime.date.today().isoformat()
         if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
             existing = get_work_schedule_for_date(staff_id, today)
@@ -660,7 +670,6 @@ class AttendanceApp:
                 upsert_work_schedule(staff_id, today, today, start, end)
                 self.log_message(f"Assigned shift {selected_shift} ({start}-{end}) for today")
 
-        # Perform checkin/checkout
         if action_key == "checkin":
             set_checkin(staff_id, time_str)
             self.log_message(f"Checked in at {time_str}")
@@ -907,7 +916,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report ----------
+    # ---------- Full Monthly Report (with deviation columns) ----------
     def export_full_monthly_report(self):
         win = tk.Toplevel(self.root)
         win.title("Full Monthly Report")
@@ -978,6 +987,56 @@ class AttendanceApp:
                                 status = "Early Leave"
                             else:
                                 status = "Overtime"
+
+                            # Calculate deviations in minutes
+                            try:
+                                ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
+                                co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
+                                ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
+                                we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
+                                # Handle night shift: if work_end < work_start, we need to treat work_end as next day
+                                # For checkout deviation, if co_dt < we_dt and we_dt < ws_dt? Actually we just compare clock times, but for night shift we need to add 24h to we_dt if it's less than ws_dt.
+                                if we_dt < ws_dt:
+                                    # Night shift: work_end is next day
+                                    # We need to compare co_dt with we_dt, but co_dt is on the same day as checkin. If co_dt < we_dt, it might be next day? Actually checkout is always after checkin, so if checkin is 21:30 and checkout is 08:00 next day, then co_dt (08:00) is less than we_dt (08:30) but actually it's next day. We need to add 24h to co_dt if it's before checkin? But we have already calculated work_hrs. For deviation, we can compute the difference between actual end and scheduled end, assuming actual end is co_dt (might be next day). We can use the work_hrs computed which already added 24h if needed. But we need minutes.
+                                    # We can compute the scheduled end datetime as we_dt + (1 day if we_dt < ws_dt else 0)
+                                    # And actual end datetime as co_dt + (1 day if co_dt < ci_dt else 0)   # but co_dt is always > ci_dt in terms of clock? Not necessarily for night shift? Actually checkin 21:30, checkout 08:00 => co_dt < ci_dt, so we add 1 day to co_dt.
+                                    # So we can compute both scheduled and actual end as datetime objects with day adjustment.
+                                    # Simpler: use work_hrs computed earlier, which gives total hours. The scheduled hours = (we_dt - ws_dt) if we_dt > ws_dt else (we_dt - ws_dt + 24h). The actual hours = work_hrs. The deviation = actual - scheduled in minutes.
+                                    # But we want separate checkin and checkout deviations.
+                                    # Checkin deviation: checkin - work_start (positive = late)
+                                    # Checkout deviation: checkout - work_end (positive = early? Actually if checkout > work_end, it's overtime, positive; if checkout < work_end, early leave, negative)
+                                    # But for night shift, work_end is next day, checkout clock time is earlier than work_end on the same day? Actually checkout clock (08:00) is less than work_end (08:30) but it's actually early? It's not early; it's the correct day. So we need to adjust.
+
+                                    # We'll compute using datetime objects with potential day shifts.
+                                    # For checkin: always same day.
+                                    ci_abs = ci_dt
+                                    ws_abs = ws_dt
+                                    checkin_dev = (ci_abs - ws_abs).total_seconds() / 60.0  # positive = late
+
+                                    # For checkout: actual checkout may be next day if co_dt < ci_dt (cross-day)
+                                    co_abs = co_dt + datetime.timedelta(days=1) if co_dt < ci_dt else co_dt
+                                    # Scheduled end may be next day if we_dt < ws_dt (night shift)
+                                    we_abs = we_dt + datetime.timedelta(days=1) if we_dt < ws_dt else we_dt
+                                    checkout_dev = (co_abs - we_abs).total_seconds() / 60.0  # positive = late/overtime, negative = early leave
+                                else:
+                                    # Normal day shift
+                                    ci_abs = ci_dt
+                                    ws_abs = ws_dt
+                                    checkin_dev = (ci_abs - ws_abs).total_seconds() / 60.0
+                                    co_abs = co_dt
+                                    we_abs = we_dt
+                                    checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
+                            except:
+                                checkin_dev = None
+                                checkout_dev = None
+
+                            # Round to nearest integer
+                            if checkin_dev is not None:
+                                checkin_dev = round(checkin_dev)
+                            if checkout_dev is not None:
+                                checkout_dev = round(checkout_dev)
+
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
@@ -986,7 +1045,9 @@ class AttendanceApp:
                                 "Checkin": checkin,
                                 "Checkout": checkout,
                                 "Work Hours": f"{work_hrs:.2f}",
-                                "Status": status
+                                "Status": status,
+                                "Checkin Deviation (min)": checkin_dev if checkin_dev is not None else "-",
+                                "Checkout Deviation (min)": checkout_dev if checkout_dev is not None else "-",
                             })
                         elif checkin and not checkout:
                             report_data.append({
@@ -997,7 +1058,9 @@ class AttendanceApp:
                                 "Checkin": checkin,
                                 "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "No Checkout Record"
+                                "Status": "No Checkout Record",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                             })
                         elif not checkin and checkout:
                             report_data.append({
@@ -1008,7 +1071,9 @@ class AttendanceApp:
                                 "Checkin": "",
                                 "Checkout": checkout,
                                 "Work Hours": "0.00",
-                                "Status": "No Checkin Record"
+                                "Status": "No Checkin Record",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                             })
                         else:
                             report_data.append({
@@ -1019,7 +1084,9 @@ class AttendanceApp:
                                 "Checkin": "",
                                 "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "Forgot Check"
+                                "Status": "Forgot Check",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                             })
                     else:
                         if schedule:
@@ -1031,7 +1098,9 @@ class AttendanceApp:
                                 "Checkin": "",
                                 "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "Forgot Check"
+                                "Status": "Forgot Check",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                             })
                         else:
                             report_data.append({
@@ -1042,7 +1111,9 @@ class AttendanceApp:
                                 "Checkin": "",
                                 "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": "Off Day"
+                                "Status": "Off Day",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                             })
 
             if not report_data:
@@ -1058,7 +1129,9 @@ class AttendanceApp:
                 return
 
             with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", "Work Hours", "Status"])
+                fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", 
+                              "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)"]
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(report_data)
 
