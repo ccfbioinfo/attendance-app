@@ -34,8 +34,9 @@ GRACE_HOURS = GRACE_MINUTES / 60.0
 SHIFT_ENTRIES = [
     (["B", "OA"], "07:45", "16:33"),
     (["MD", "D8", "R8"], "08:00", "16:48"),
-    (["SAT", "AP LA"], "08:00", "16:48"),   # SAT and AP LA both map to this time
-    (["A", "C", "D", "SAT"], "08:15", "17:03"),  # Overwrites earlier SAT, D
+    (["SAT", "AP_LA"], "08:00", "16:48"),   # SAT and AP LA both map to this time
+    (["A", "C", "SAT"], "08:15", "17:03"),  # Overwrites earlier SAT, D
+    (["D", "AP"], "08:15", "17:03"),
     (["W"], "08:30", "17:18"),
     (["S"], "08:45", "17:33"),
     (["D", "SD"], "09:00", "17:48"),       # Overwrites earlier D
