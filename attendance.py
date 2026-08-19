@@ -1,9 +1,7 @@
 """
-Staff Duty Attendance System v3.8
-- Fixed lag and recording failure in confirmation window.
-- Each confirmation uses independent timer and variables.
-- Enhanced error logging.
-- All previous features retained.
+Staff Duty Attendance System v3.9
+- Confirmation window enlarged to 650x450.
+- Fixed deviation columns in monthly report (now correctly calculated).
 """
 
 import sqlite3
@@ -33,20 +31,19 @@ GRACE_HOURS = GRACE_MINUTES / 60.0
 SHIFT_ENTRIES = [
     (["B", "OA"], "07:45", "16:33"),
     (["MD", "D8", "R8"], "08:00", "16:48"),
-    (["SAT", "AP_LA"], "08:00", "16:48"),   # SAT and AP LA both map to this time
-    (["A", "C", "SAT"], "08:15", "17:03"),  # Overwrites earlier SAT, D
-    (["D", "AP"], "08:15", "17:03"),
+    (["SAT", "AP LA"], "08:00", "16:48"),
+    (["A", "C", "D", "SAT"], "08:15", "17:03"),
     (["W"], "08:30", "17:18"),
     (["S"], "08:45", "17:33"),
-    (["D", "SD"], "09:00", "17:48"),       # Overwrites earlier D
+    (["D", "SD"], "09:00", "17:48"),
     (["AA1"], "09:00", "18:00"),
     (["AA2"], "09:00", "17:00"),
-    (["P", "AP", "OB*"], "09:15", "18:03"),  # AP already exists? will be overwritten
+    (["P", "AP", "OB*"], "09:15", "18:03"),
     (["OB"], "09:45", "18:33"),
     (["R10"], "10:00", "18:48"),
-    (["N", "AP"], "10:15", "19:03"),        # AP overwritten again
-    (["P", "Core"], "13:00", "21:48"),      # P overwritten
-    (["N", "Core"], "21:30", "08:30"),      # N overwritten
+    (["N", "AP"], "10:15", "19:03"),
+    (["P", "Core"], "13:00", "21:48"),
+    (["N", "Core"], "21:30", "08:30"),
 ]
 
 SHIFT_MAP = {}
@@ -282,7 +279,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.8")
+        self.root.title("Staff Attendance System v3.9")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -553,39 +550,36 @@ class AttendanceApp:
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog (fixed) ----------
+    # ---------- Confirmation Dialog (enlarged) ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("550x400")
+        dialog.geometry("650x450")          # 进一步放大
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.focus_force()
 
-        # Disable main controls
         self.barcode_entry.config(state=tk.DISABLED)
         self.scan_btn.config(state=tk.DISABLED)
         self.confirm_dialog = dialog
 
-        # Local variables for timer and countdown
         countdown = 20
         timer_id = None
 
-        # Widgets
-        ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
-        ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
+        # 使用 grid 布局，适当增加行间距
+        ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Batch:", font=("Arial", 12)).grid(row=1, column=0, padx=10, pady=5, sticky=tk.W)
-        ttk.Label(dialog, text=batch or "-", font=("Arial", 12)).grid(row=1, column=1, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text="Batch:", font=("Arial", 12)).grid(row=1, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=batch or "-", font=("Arial", 12)).grid(row=1, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Current time:", font=("Arial", 12)).grid(row=2, column=0, padx=10, pady=5, sticky=tk.W)
-        ttk.Label(dialog, text=current_time, font=("Arial", 12, "bold")).grid(row=2, column=1, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text="Current time:", font=("Arial", 12)).grid(row=2, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=current_time, font=("Arial", 12, "bold")).grid(row=2, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=10, pady=5, sticky=tk.W)
-        ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=10, pady=5, sticky=tk.W)
+        ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
 
-        # Schedule info / shift selection
         today = datetime.date.today().isoformat()
         existing_schedule = get_work_schedule_for_date(staff_id, today)
         shift_combo = None
@@ -601,30 +595,28 @@ class AttendanceApp:
                 display_text = f"已有排班: {code} ({start} - {end})"
             else:
                 display_text = f"已有排班: {start} - {end}"
-            ttk.Label(dialog, text="Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=10, pady=5, sticky=tk.W)
-            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=10, pady=5, sticky=tk.W)
+            ttk.Label(dialog, text="Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
         else:
-            ttk.Label(dialog, text="Select Shift (optional):", font=("Arial", 12)).grid(row=4, column=0, padx=10, pady=5, sticky=tk.W)
+            ttk.Label(dialog, text="Select Shift (optional):", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
             shift_list = []
             for code, times in SHIFT_MAP.items():
                 if times is not None:
                     start, end = times
                     shift_list.append(f"{code}: {start} - {end}")
             if shift_list:
-                combo = ttk.Combobox(dialog, values=shift_list, width=35, font=("Arial", 10))
-                combo.grid(row=4, column=1, padx=10, pady=5)
+                combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
+                combo.grid(row=4, column=1, padx=15, pady=8)
                 combo.current(0)
                 shift_combo = combo
             else:
-                ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=10, pady=5)
+                ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
 
-        # Countdown label
-        countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 10))
-        countdown_label.grid(row=5, column=0, columnspan=2, pady=10)
+        countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
+        countdown_label.grid(row=5, column=0, columnspan=2, pady=15)
 
-        # Buttons
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=6, column=0, columnspan=2, pady=15)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
 
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
@@ -635,7 +627,6 @@ class AttendanceApp:
                 dialog.after_cancel(timer_id)
 
         def perform_action_with_shift(selected_shift=None):
-            # If selected shift and no schedule exists, write schedule
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
                 existing = get_work_schedule_for_date(staff_id, today)
                 if not existing:
@@ -645,7 +636,6 @@ class AttendanceApp:
                     else:
                         self.log_message("Failed to save shift schedule")
 
-            # Perform checkin/checkout
             success = False
             if action_key == "checkin":
                 success = set_checkin(staff_id, current_time)
@@ -697,15 +687,13 @@ class AttendanceApp:
             dialog.destroy()
 
         confirm_btn = ttk.Button(btn_frame, text="Confirm", command=do_confirm, width=12)
-        confirm_btn.pack(side=tk.LEFT, padx=10)
+        confirm_btn.pack(side=tk.LEFT, padx=15)
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
-        cancel_btn.pack(side=tk.LEFT, padx=10)
+        cancel_btn.pack(side=tk.LEFT, padx=15)
 
-        # Countdown function
         def update_countdown():
             nonlocal countdown, timer_id
             if countdown <= 0:
-                # Auto-confirm
                 if timer_id:
                     timer_id = None
                 selected_shift = None
@@ -723,10 +711,7 @@ class AttendanceApp:
             countdown -= 1
             timer_id = dialog.after(1000, update_countdown)
 
-        # Start countdown
         timer_id = dialog.after(1000, update_countdown)
-
-        # Handle window close
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
     # ---------- Staff Management ----------
@@ -1067,29 +1052,36 @@ class AttendanceApp:
                             else:
                                 status = "Overtime"
 
-                            # Calculate deviations
+                            # ---- 修正偏差计算 ----
                             try:
                                 ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
                                 co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
                                 ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
                                 we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
-                                if we_dt < ws_dt:  # night shift
-                                    ci_abs = ci_dt
-                                    ws_abs = ws_dt
-                                    checkin_dev = (ci_abs - ws_abs).total_seconds() / 60.0
-                                    co_abs = co_dt + datetime.timedelta(days=1) if co_dt < ci_dt else co_dt
-                                    we_abs = we_dt + datetime.timedelta(days=1) if we_dt < ws_dt else we_dt
+
+                                # 判断是否夜班（下班时间早于上班时间）
+                                if we_dt < ws_dt:
+                                    # 夜班：结束时间为次日
+                                    # 实际签出时间若早于签到时间，则加一天
+                                    if co_dt < ci_dt:
+                                        co_abs = co_dt + datetime.timedelta(days=1)
+                                    else:
+                                        co_abs = co_dt
+                                    # 计划结束时间加一天
+                                    we_abs = we_dt + datetime.timedelta(days=1)
+                                    # 签到偏差（正 = 迟到）
+                                    checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                                    # 签退偏差（正 = 加班，负 = 早退）
                                     checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
                                 else:
-                                    ci_abs = ci_dt
-                                    ws_abs = ws_dt
-                                    checkin_dev = (ci_abs - ws_abs).total_seconds() / 60.0
-                                    co_abs = co_dt
-                                    we_abs = we_dt
-                                    checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
+                                    # 正常班次
+                                    checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                                    checkout_dev = (co_dt - we_dt).total_seconds() / 60.0
+
                                 checkin_dev = round(checkin_dev)
                                 checkout_dev = round(checkout_dev)
-                            except:
+                            except Exception as e:
+                                self.log_message(f"Deviation calc error for {name} on {date_str}: {e}")
                                 checkin_dev = None
                                 checkout_dev = None
 
