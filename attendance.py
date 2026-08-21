@@ -1,7 +1,9 @@
 """
 Staff Duty Attendance System v4.0
-- Updated shift map according to the latest list.
-- All previous features retained.
+- Updated shift mapping per latest duty list.
+- Fixed deviation columns in monthly report (time format padding).
+- Enlarged confirmation window.
+- Confirmation timeout 20 seconds.
 """
 
 import sqlite3
@@ -27,34 +29,55 @@ STANDARD_HOURS = 8.8
 GRACE_MINUTES = 0
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Updated Shift Code Mapping (based on latest list) ----------
-# Format: (list_of_codes, start_time, end_time)
+# ---------- Updated Shift Code Mapping ----------
+# Based on the latest duty list provided.
+# Format: (code, start_time, end_time) - times in "HH:MM"
 SHIFT_ENTRIES = [
-    (["B", "OA"], "07:45", "16:33"),
-    (["MD", "D8", "R8", "SAT_LA"], "08:00", "16:48"),
-    (["A", "C", "SAT_Tech", "D_AP"], "08:15", "17:03"),
-    (["W"], "08:30", "17:18"),
-    (["S"], "08:45", "17:33"),
-    (["D", "SD"], "09:00", "17:48"),
-    (["AA1"], "09:00", "18:00"),
-    (["AA2"], "09:00", "17:00"),
-    (["P_AP", "OB*"], "09:15", "18:03"),
-    (["OB"], "09:45", "18:33"),
-    (["R10"], "10:00", "18:48"),
-    (["N_AP"], "10:15", "19:03"),
-    (["P_Core"], "13:00", "21:48"),
-    (["N_Core"], "21:30", "08:30"),
+    ("B", "07:45", "16:33"),
+    ("OA", "07:45", "16:33"),
+    ("MD", "08:00", "16:48"),
+    ("D8", "08:00", "16:48"),
+    ("R8", "08:00", "16:48"),
+    ("SAT_LA", "08:00", "16:48"),
+    ("A", "08:15", "17:03"),
+    ("C", "08:15", "17:03"),
+    ("SAT_Tech", "08:15", "17:03"),
+    ("D_AP", "08:15", "17:03"),
+    ("W", "08:30", "17:18"),
+    ("S", "08:45", "17:33"),
+    ("D", "09:00", "17:48"),
+    ("SD", "09:00", "17:48"),
+    ("AA1", "09:00", "18:00"),
+    ("AA2", "09:00", "17:00"),
+    ("P_AP", "09:15", "18:03"),
+    ("OB*", "09:15", "18:03"),
+    ("OB", "09:45", "18:33"),
+    ("R10", "10:00", "18:48"),
+    ("N_AP", "10:15", "19:03"),
+    ("P_Core", "13:00", "21:48"),
+    ("N_Core", "21:30", "08:30"),
 ]
 
+# Build SHIFT_MAP
 SHIFT_MAP = {}
-for codes, start, end in SHIFT_ENTRIES:
-    for code in codes:
-        SHIFT_MAP[code] = (start, end)
+for code, start, end in SHIFT_ENTRIES:
+    SHIFT_MAP[code] = (start, end)
 
-# Rest/Leave codes (no schedule)
+# Rest/Leave codes
 REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
+
+# ---------- Helper: pad time strings to HH:MM:SS ----------
+def pad_time(t):
+    """Ensure time string is in HH:MM:SS format."""
+    if not t:
+        return t
+    t = t.strip()
+    if len(t) == 5 and ':' in t:  # "HH:MM"
+        return t + ":00"
+    # If already HH:MM:SS, return as is
+    return t
 
 # ---------- Database Path ----------
 def get_db_path():
@@ -971,7 +994,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report (with deviation columns) ----------
+    # ---------- Full Monthly Report (with deviation columns, fixed) ----------
     def export_full_monthly_report(self):
         win = tk.Toplevel(self.root)
         win.title("Full Monthly Report")
@@ -1041,6 +1064,10 @@ class AttendanceApp:
                     else:
                         work_start, work_end = WORK_START, WORK_END
 
+                    # 补全时间格式为 HH:MM:SS
+                    work_start = pad_time(work_start)
+                    work_end = pad_time(work_end)
+
                     if date_str in records:
                         checkin, checkout = records[date_str]
                         if checkin and checkout:
@@ -1052,13 +1079,14 @@ class AttendanceApp:
                             else:
                                 status = "Overtime"
 
+                            # ---- 计算偏差（已修复时间格式） ----
                             try:
                                 ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
                                 co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
                                 ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
                                 we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
 
-                                if we_dt < ws_dt:  # night shift
+                                if we_dt < ws_dt:  # 夜班
                                     if co_dt < ci_dt:
                                         co_abs = co_dt + datetime.timedelta(days=1)
                                     else:
