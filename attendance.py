@@ -1,7 +1,7 @@
 """
-Staff Duty Attendance System v3.9
-- Confirmation window enlarged to 650x450.
-- Fixed deviation columns in monthly report (now correctly calculated).
+Staff Duty Attendance System v4.0
+- Updated shift map according to the latest list.
+- All previous features retained.
 """
 
 import sqlite3
@@ -27,18 +27,18 @@ STANDARD_HOURS = 8.8
 GRACE_MINUTES = 0
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Code Mapping (updated) ----------
+# ---------- Updated Shift Code Mapping (based on latest list) ----------
+# Format: (list_of_codes, start_time, end_time)
 SHIFT_ENTRIES = [
-    (["B_OA"], "07:45", "16:33"),
-    (["MD_D8_R8"], "08:00", "16:48"),
-    (["SAT_AP_LA"], "08:00", "16:48"),
-    (["A_C_D_SAT"], "08:15", "17:03"),
+    (["B", "OA"], "07:45", "16:33"),
+    (["MD", "D8", "R8", "SAT_LA"], "08:00", "16:48"),
+    (["A", "C", "SAT_Tech", "D_AP"], "08:15", "17:03"),
     (["W"], "08:30", "17:18"),
     (["S"], "08:45", "17:33"),
-    (["D_SD"], "09:00", "17:48"),
+    (["D", "SD"], "09:00", "17:48"),
     (["AA1"], "09:00", "18:00"),
     (["AA2"], "09:00", "17:00"),
-    (["P_AP_OB*"], "09:15", "18:03"),
+    (["P_AP", "OB*"], "09:15", "18:03"),
     (["OB"], "09:45", "18:33"),
     (["R10"], "10:00", "18:48"),
     (["N_AP"], "10:15", "19:03"),
@@ -51,6 +51,7 @@ for codes, start, end in SHIFT_ENTRIES:
     for code in codes:
         SHIFT_MAP[code] = (start, end)
 
+# Rest/Leave codes (no schedule)
 REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
@@ -279,7 +280,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v3.9")
+        self.root.title("Staff Attendance System v4.0")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -550,11 +551,11 @@ class AttendanceApp:
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog (enlarged) ----------
+    # ---------- Confirmation Dialog ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("650x450")          # 进一步放大
+        dialog.geometry("650x450")
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -567,7 +568,6 @@ class AttendanceApp:
         countdown = 20
         timer_id = None
 
-        # 使用 grid 布局，适当增加行间距
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
         ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
 
@@ -1052,29 +1052,21 @@ class AttendanceApp:
                             else:
                                 status = "Overtime"
 
-                            # ---- 修正偏差计算 ----
                             try:
                                 ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
                                 co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
                                 ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
                                 we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
 
-                                # 判断是否夜班（下班时间早于上班时间）
-                                if we_dt < ws_dt:
-                                    # 夜班：结束时间为次日
-                                    # 实际签出时间若早于签到时间，则加一天
+                                if we_dt < ws_dt:  # night shift
                                     if co_dt < ci_dt:
                                         co_abs = co_dt + datetime.timedelta(days=1)
                                     else:
                                         co_abs = co_dt
-                                    # 计划结束时间加一天
                                     we_abs = we_dt + datetime.timedelta(days=1)
-                                    # 签到偏差（正 = 迟到）
                                     checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
-                                    # 签退偏差（正 = 加班，负 = 早退）
                                     checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
                                 else:
-                                    # 正常班次
                                     checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
                                     checkout_dev = (co_dt - we_dt).total_seconds() / 60.0
 
