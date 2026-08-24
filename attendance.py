@@ -1,10 +1,11 @@
 """
-Staff Duty Attendance System v5.0
-- Status logic: multiple tags, comma-separated, appended.
-- Password lock for staff edit, reports.
-- Checkin: no countdown; Checkout: 10s countdown.
-- Auto backup at 12:00 daily.
-- Deviation calculation fixed.
+Staff Duty Attendance System v5.2
+- Added daily activity log stored in backup folder.
+- View Daily Log button to read current day's log.
+- Fixed Shift Code Reference display.
+- Re-select time slot on confirmation.
+- Password-protected admin functions.
+- Auto backup at 12:00.
 """
 
 import sqlite3
@@ -33,7 +34,7 @@ STANDARD_HOURS = 8.8
 GRACE_MINUTES = 0
 GRACE_HOURS = GRACE_MINUTES / 60.0
 
-# ---------- Shift Code Mapping (updated) ----------
+# ---------- Shift Code Mapping ----------
 SHIFT_ENTRIES = [
     ("B", "07:45", "16:33"),
     ("OA", "07:45", "16:33"),
@@ -68,7 +69,7 @@ REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
 
-# ---------- Helper: pad time strings to HH:MM:SS ----------
+# ---------- Helper Functions ----------
 def pad_time(t):
     if not t:
         return t
@@ -77,7 +78,6 @@ def pad_time(t):
         return t + ":00"
     return t
 
-# ---------- Database Path ----------
 def get_db_path():
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
@@ -88,37 +88,55 @@ def get_db_path():
 
 DB_PATH = get_db_path()
 
-# ---------- Backup Function ----------
+def get_backup_dir():
+    """Determine the backup directory (same as used for database backup)."""
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    backup_dir = os.path.join(base_dir, 'backup')
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        test_file = os.path.join(backup_dir, 'test.tmp')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return backup_dir
+    except:
+        # Fallback to AppData
+        if os.name == 'nt':
+            appdata = os.getenv('APPDATA')
+            if not appdata:
+                appdata = os.path.expanduser('~/AppData/Roaming')
+            backup_dir = os.path.join(appdata, 'AttendanceSystem', 'backup')
+        else:
+            backup_dir = os.path.expanduser('~/.local/share/AttendanceSystem/backup')
+        os.makedirs(backup_dir, exist_ok=True)
+        return backup_dir
+
+def get_today_log_path():
+    """Return path to today's log file in backup directory."""
+    backup_dir = get_backup_dir()
+    today = datetime.date.today().isoformat()
+    return os.path.join(backup_dir, f"{today}.log")
+
+def write_log_to_file(msg):
+    """Append a log message to today's log file."""
+    try:
+        log_path = get_today_log_path()
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f"{timestamp} - {msg}\n")
+    except Exception as e:
+        print(f"Failed to write log: {e}")
+
+# ---------- Database Backup ----------
 def backup_db():
-    """Backup the database to backup folder."""
     try:
         src = DB_PATH
         if not os.path.exists(src):
             return
-        # Determine backup directory
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        backup_dir = os.path.join(base_dir, 'backup')
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-            # Test write permission
-            test_file = os.path.join(backup_dir, 'test.tmp')
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-        except:
-            # Fallback to AppData
-            if os.name == 'nt':
-                appdata = os.getenv('APPDATA')
-                if not appdata:
-                    appdata = os.path.expanduser('~/AppData/Roaming')
-                backup_dir = os.path.join(appdata, 'AttendanceSystem', 'backup')
-            else:
-                backup_dir = os.path.expanduser('~/.local/share/AttendanceSystem/backup')
-            os.makedirs(backup_dir, exist_ok=True)
-
+        backup_dir = get_backup_dir()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         dest = os.path.join(backup_dir, f'attendance_{timestamp}.db')
         shutil.copy2(src, dest)
@@ -127,7 +145,6 @@ def backup_db():
         print(f"Backup failed: {e}")
 
 def schedule_backup():
-    """Schedule daily backup at 12:00."""
     now = datetime.datetime.now()
     target = now.replace(hour=12, minute=0, second=0, microsecond=0)
     if now >= target:
@@ -137,14 +154,13 @@ def schedule_backup():
 
 def backup_and_reschedule():
     backup_db()
-    schedule_backup()  # Schedule next day
+    schedule_backup()
 
 # ---------- Database Setup ----------
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # Staff table
         c.execute('''
             CREATE TABLE IF NOT EXISTS staff (
                 staff_id TEXT PRIMARY KEY,
@@ -152,7 +168,6 @@ def init_db():
                 batch TEXT
             )
         ''')
-        # Attendance table with status field
         c.execute('''
             CREATE TABLE IF NOT EXISTS attendance (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,7 +180,6 @@ def init_db():
                 UNIQUE(staff_id, date)
             )
         ''')
-        # Work schedule table
         c.execute('''
             CREATE TABLE IF NOT EXISTS work_schedule (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,14 +192,12 @@ def init_db():
                 UNIQUE(staff_id, start_date, end_date)
             )
         ''')
-        # Config table for password
         c.execute('''
             CREATE TABLE IF NOT EXISTS config (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         ''')
-        # Insert default password if not exists
         c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('admin_password', 'admin123')")
         conn.commit()
         conn.close()
@@ -220,7 +232,6 @@ def check_password(input_pw):
     return input_pw == get_admin_password()
 
 def verify_password(parent=None):
-    """Show password dialog, return True if correct."""
     pw = simpledialog.askstring("Password Required", "Enter admin password:", show='*', parent=parent)
     if pw is None:
         return False
@@ -268,16 +279,13 @@ def set_checkin(staff_id, time_str):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # Check existing status
         c.execute("SELECT status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         existing_status = row[0] if row else ''
-        # Append "Checked In" if not already present
         tags = [t.strip() for t in existing_status.split(',') if t.strip()]
         if 'Checked In' not in tags:
             tags.append('Checked In')
         new_status = ', '.join(tags) if tags else 'Checked In'
-
         c.execute('''
             INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status)
             VALUES (?, ?, ?, NULL, ?)
@@ -289,12 +297,11 @@ def set_checkin(staff_id, time_str):
         print(f"set_checkin error: {e}")
         return False
 
-def set_checkout(staff_id, time_str, selected_shift=None):
+def set_checkout(staff_id, time_str):
     try:
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # Get current record
         c.execute("SELECT checkin, status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         if not row:
@@ -305,7 +312,6 @@ def set_checkout(staff_id, time_str, selected_shift=None):
             conn.close()
             return False
 
-        # Determine work schedule
         schedule = get_work_schedule_for_date(staff_id, today)
         if schedule:
             work_start, work_end = schedule
@@ -314,17 +320,14 @@ def set_checkout(staff_id, time_str, selected_shift=None):
         work_start = pad_time(work_start)
         work_end = pad_time(work_end)
 
-        # Calculate deviations and status tags
         tags = [t.strip() for t in status.split(',') if t.strip()] if status else []
 
-        # Compute checkin deviation
         try:
             ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
             ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
             co_dt = datetime.datetime.strptime(time_str, "%H:%M:%S")
             we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
 
-            # Night shift detection
             if we_dt < ws_dt:  # night shift
                 if co_dt < ci_dt:
                     co_abs = co_dt + datetime.timedelta(days=1)
@@ -337,35 +340,30 @@ def set_checkout(staff_id, time_str, selected_shift=None):
                 checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
                 checkout_dev = (co_dt - we_dt).total_seconds() / 60.0
 
-            # Build status tags
             if checkin_dev > 0:
                 tags.append('Late')
             elif checkin_dev < 0:
-                tags.append('Early In')  # optional, but we keep it consistent
+                tags.append('Early In')
             else:
-                pass  # on time
+                pass
 
             if checkout_dev > 0:
                 tags.append('Overtime')
             elif checkout_dev < 0:
                 tags.append('Early Leave')
             else:
-                pass  # on time
+                pass
 
-            # If no deviation, ensure 'Normal' is set
             if not any(t in ['Late', 'Early In', 'Overtime', 'Early Leave'] for t in tags):
                 tags.append('Normal')
 
-            # Remove 'Checked In' if present
             tags = [t for t in tags if t != 'Checked In']
-            # Remove duplicates
             unique_tags = []
             for t in tags:
                 if t not in unique_tags:
                     unique_tags.append(t)
             new_status = ', '.join(unique_tags)
 
-            # Update checkout and status
             c.execute('''
                 UPDATE attendance SET checkout=?, status=?
                 WHERE staff_id=? AND date=?
@@ -386,7 +384,6 @@ def override_checkin(staff_id, time_str):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # Remove any previous status and set to 'Override'
         c.execute('''
             UPDATE attendance SET checkin=?, checkout=NULL, status=?
             WHERE staff_id=? AND date=?
@@ -483,7 +480,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.0")
+        self.root.title("Staff Attendance System v5.2")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -493,7 +490,6 @@ class AttendanceApp:
         self.create_widgets()
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
-        # Start backup scheduler
         schedule_backup()
 
     def show_db_path(self):
@@ -501,7 +497,8 @@ class AttendanceApp:
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
                             "Missing check-in/out will be marked in reports.\n"
-                            "Auto backup at 12:00 daily.")
+                            "Auto backup at 12:00 daily.\n"
+                            "Daily activity log stored in backup folder.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -537,6 +534,7 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Shift Code Reference", command=self.show_shift_reference).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="View Daily Log", command=self.view_daily_log).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Change Password", command=self.change_password).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
 
@@ -547,45 +545,57 @@ class AttendanceApp:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def log_message(self, msg):
+        """Log message to UI and to daily log file."""
+        # UI
         self.log_text.config(state=tk.NORMAL)
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-        self.log_text.insert(tk.END, f"{timestamp} - {msg}\n")
+        full_msg = f"{timestamp} - {msg}\n"
+        self.log_text.insert(tk.END, full_msg)
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+        # File log
+        write_log_to_file(msg)
 
-    def update_status(self, staff_id=None):
-        if staff_id:
-            self.current_staff_id = staff_id
-            staff = get_staff(staff_id)
-            if staff:
-                self.current_name = staff[1]
-                self.current_batch = staff[2]
-                self.name_var.set(self.current_name)
-                self.batch_var.set(self.current_batch)
-                att = get_today_attendance(staff_id)
-                if att:
-                    checkin_time = att[0]
-                    checkout_time = att[1]
-                    status = att[2]
-                    if checkout_time:
-                        self.status_var.set(f"Checked out at {checkout_time} | Status: {status}")
-                    else:
-                        self.status_var.set(f"Checked in at {checkin_time} | Status: {status}")
-                else:
-                    self.status_var.set("Not checked in today")
-            else:
-                self.current_name = None
-                self.current_batch = None
-                self.name_var.set("Unknown")
-                self.batch_var.set("")
-                self.status_var.set("Staff ID not found")
-        else:
-            self.current_staff_id = None
-            self.current_name = None
-            self.current_batch = None
-            self.name_var.set("")
-            self.batch_var.set("")
-            self.status_var.set("Ready")
+    def view_daily_log(self):
+        """Open a window to display today's log file content."""
+        log_path = get_today_log_path()
+        if not os.path.exists(log_path):
+            messagebox.showinfo("No Log", "No log entries for today yet.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Daily Log - {datetime.date.today().isoformat()}")
+        win.geometry("700x500")
+
+        # Text widget with scrollbar
+        frame = ttk.Frame(win)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        text_widget = tk.Text(frame, wrap=tk.NONE, font=("Courier", 10))
+        scrollbar_y = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar_x = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+        text_widget.config(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        scrollbar_x.grid(row=1, column=0, sticky="ew")
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        # Load log content
+        try:
+            with open(log_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            text_widget.insert(tk.END, content)
+            text_widget.config(state=tk.DISABLED)
+        except Exception as e:
+            text_widget.insert(tk.END, f"Error reading log: {str(e)}")
+
+        # Button to open folder
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=5)
+        ttk.Button(btn_frame, text="Open Log Folder", 
+                   command=lambda: os.startfile(os.path.dirname(log_path)) if os.name == 'nt' else \
+                       messagebox.showinfo("Info", f"Log folder: {os.path.dirname(log_path)}")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
     # ---------- Password Management ----------
     def change_password(self):
@@ -603,7 +613,7 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference Window ----------
+    # ---------- Shift Code Reference ----------
     def show_shift_reference(self):
         win = tk.Toplevel(self.root)
         win.title("Shift Code Reference")
@@ -615,14 +625,16 @@ class AttendanceApp:
         tree.heading("End", text="End Time")
         tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        for code, times in SHIFT_MAP.items():
-            if times is not None:
-                start, end = times
+        valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
+        if not valid_shifts:
+            ttk.Label(win, text="No shift codes found.", font=("Arial", 12), foreground="red").pack(pady=20)
+        else:
+            for code, start, end in valid_shifts:
                 tree.insert("", tk.END, values=(code, start, end))
 
         rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
         if rest_codes:
-            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}",
+            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}", 
                       font=("Arial", 10), foreground="gray").pack(pady=5)
 
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
@@ -789,9 +801,8 @@ class AttendanceApp:
         self.scan_btn.config(state=tk.DISABLED)
         self.confirm_dialog = dialog
 
-        # Determine countdown: only for checkout/override, not for checkin
         if action_key == "checkin":
-            countdown = None  # No countdown
+            countdown = None
         else:
             countdown = 10
 
@@ -813,35 +824,36 @@ class AttendanceApp:
         existing_schedule = get_work_schedule_for_date(staff_id, today)
         shift_combo = None
 
+        shift_list = []
+        for code, times in SHIFT_MAP.items():
+            if times is not None:
+                start, end = times
+                shift_list.append(f"{code}: {start} - {end}")
+
+        current_code = None
         if existing_schedule:
             start, end = existing_schedule
-            code = None
-            for c, times in SHIFT_MAP.items():
-                if times and times[0] == start and times[1] == end:
-                    code = c
-                    break
-            if code:
-                display_text = f"已有排班: {code} ({start} - {end})"
-            else:
-                display_text = f"已有排班: {start} - {end}"
-            ttk.Label(dialog, text="Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
-        else:
-            ttk.Label(dialog, text="Select Shift (optional):", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-            shift_list = []
             for code, times in SHIFT_MAP.items():
-                if times is not None:
-                    start, end = times
-                    shift_list.append(f"{code}: {start} - {end}")
-            if shift_list:
-                combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
-                combo.grid(row=4, column=1, padx=15, pady=8)
-                combo.current(0)
-                shift_combo = combo
-            else:
-                ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
+                if times and times[0] == start and times[1] == end:
+                    current_code = code
+                    break
 
-        # Countdown label (only if countdown is set)
+        ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+        if shift_list:
+            combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
+            combo.grid(row=4, column=1, padx=15, pady=8)
+            if current_code:
+                default_text = f"{current_code}: {existing_schedule[0]} - {existing_schedule[1]}"
+                if default_text in shift_list:
+                    combo.set(default_text)
+                else:
+                    combo.current(0)
+            else:
+                combo.current(0)
+            shift_combo = combo
+        else:
+            ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
+
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
@@ -859,17 +871,13 @@ class AttendanceApp:
                 dialog.after_cancel(timer_id)
 
         def perform_action_with_shift(selected_shift=None):
-            # If selected shift and no schedule exists, write schedule
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
-                existing = get_work_schedule_for_date(staff_id, today)
-                if not existing:
-                    start, end = SHIFT_MAP[selected_shift]
-                    if upsert_work_schedule(staff_id, today, today, start, end):
-                        self.log_message(f"Assigned shift {selected_shift} ({start}-{end}) for today")
-                    else:
-                        self.log_message("Failed to save shift schedule")
+                start, end = SHIFT_MAP[selected_shift]
+                if upsert_work_schedule(staff_id, today, today, start, end):
+                    self.log_message(f"Updated shift to {selected_shift} ({start}-{end}) for today")
+                else:
+                    self.log_message("Failed to update shift schedule")
 
-            # Perform action
             success = False
             if action_key == "checkin":
                 success = set_checkin(staff_id, current_time)
@@ -878,7 +886,7 @@ class AttendanceApp:
                 else:
                     self.log_message("Failed to record checkin")
             elif action_key == "checkout":
-                success = set_checkout(staff_id, current_time, selected_shift)
+                success = set_checkout(staff_id, current_time)
                 if success:
                     self.log_message(f"Checked out at {current_time}")
                 else:
@@ -925,7 +933,6 @@ class AttendanceApp:
         cancel_btn = ttk.Button(btn_frame, text="Cancel", command=do_cancel, width=12)
         cancel_btn.pack(side=tk.LEFT, padx=15)
 
-        # Countdown function (only for checkout/override)
         def update_countdown():
             nonlocal countdown, timer_id
             if countdown is None:
@@ -948,13 +955,12 @@ class AttendanceApp:
             countdown -= 1
             timer_id = dialog.after(1000, update_countdown)
 
-        # Start countdown only if set
         if countdown is not None:
             timer_id = dialog.after(1000, update_countdown)
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management (with password) ----------
+    # ---------- Staff Management ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1057,7 +1063,7 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
-    # ---------- Add New Staff (quick) ----------
+    # ---------- Add New Staff ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
@@ -1073,7 +1079,7 @@ class AttendanceApp:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to add staff: {str(e)}")
 
-    # ---------- Monthly Exception Report (with password) ----------
+    # ---------- Monthly Exception Report ----------
     def show_monthly_summary(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1151,7 +1157,6 @@ class AttendanceApp:
 
                     if date_str in records:
                         checkin, checkout, status = records[date_str]
-                        # Check status for anomalies
                         if status:
                             status_lower = status.lower()
                             if 'late' in status_lower or 'early leave' in status_lower or 'forgot' in status_lower or 'no checkout' in status_lower or 'no checkin' in status_lower:
@@ -1209,7 +1214,7 @@ class AttendanceApp:
         ttk.Button(win, text="Generate", command=generate).pack(pady=20)
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
-    # ---------- Full Monthly Report (with password) ----------
+    # ---------- Full Monthly Report ----------
     def export_full_monthly_report(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1292,8 +1297,6 @@ class AttendanceApp:
                         checkin, checkout, status = records[date_str]
                         if checkin and checkout:
                             work_hrs = calculate_work_hours(checkin, checkout)
-                            # Status already stored, we can just use it
-                            # Compute deviations for display
                             try:
                                 ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
                                 co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
@@ -1409,7 +1412,7 @@ class AttendanceApp:
 
             try:
                 with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
-                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout",
+                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", 
                                   "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
