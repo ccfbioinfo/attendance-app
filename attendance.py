@@ -1,11 +1,9 @@
 """
 Staff Duty Attendance System v5.2
-- Added daily activity log stored in backup folder.
-- View Daily Log button to read current day's log.
-- Fixed Shift Code Reference display.
-- Re-select time slot on confirmation.
-- Password-protected admin functions.
-- Auto backup at 12:00.
+- Fixed attribute error for update_status.
+- Added exception handling to prevent silent crashes.
+- Daily activity log stored in backup folder.
+- View Daily Log button.
 """
 
 import sqlite3
@@ -19,6 +17,7 @@ import re
 import threading
 import shutil
 import time
+import traceback
 
 try:
     from openpyxl import load_workbook
@@ -89,7 +88,6 @@ def get_db_path():
 DB_PATH = get_db_path()
 
 def get_backup_dir():
-    """Determine the backup directory (same as used for database backup)."""
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
     else:
@@ -103,7 +101,6 @@ def get_backup_dir():
         os.remove(test_file)
         return backup_dir
     except:
-        # Fallback to AppData
         if os.name == 'nt':
             appdata = os.getenv('APPDATA')
             if not appdata:
@@ -115,13 +112,11 @@ def get_backup_dir():
         return backup_dir
 
 def get_today_log_path():
-    """Return path to today's log file in backup directory."""
     backup_dir = get_backup_dir()
     today = datetime.date.today().isoformat()
     return os.path.join(backup_dir, f"{today}.log")
 
 def write_log_to_file(msg):
-    """Append a log message to today's log file."""
     try:
         log_path = get_today_log_path()
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
@@ -201,9 +196,10 @@ def init_db():
         c.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('admin_password', 'admin123')")
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
         messagebox.showerror("Database Error", f"Failed to initialize database:\n{str(e)}")
-        sys.exit(1)
+        return False
 
 # ---------- Database Helpers ----------
 def get_admin_password():
@@ -489,7 +485,7 @@ class AttendanceApp:
         self.current_batch = None
         self.create_widgets()
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
-        self.update_status()
+        self.update_status()  # <-- 方法名正确
         schedule_backup()
 
     def show_db_path(self):
@@ -546,15 +542,48 @@ class AttendanceApp:
 
     def log_message(self, msg):
         """Log message to UI and to daily log file."""
-        # UI
         self.log_text.config(state=tk.NORMAL)
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
         full_msg = f"{timestamp} - {msg}\n"
         self.log_text.insert(tk.END, full_msg)
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
-        # File log
         write_log_to_file(msg)
+
+    def update_status(self, staff_id=None):
+        """Update the staff info and status display."""
+        if staff_id:
+            self.current_staff_id = staff_id
+            staff = get_staff(staff_id)
+            if staff:
+                self.current_name = staff[1]
+                self.current_batch = staff[2]
+                self.name_var.set(self.current_name)
+                self.batch_var.set(self.current_batch)
+                att = get_today_attendance(staff_id)
+                if att:
+                    checkin_time = att[0]
+                    checkout_time = att[1]
+                    status = att[2]
+                    if checkout_time:
+                        self.status_var.set(f"Checked out at {checkout_time} | Status: {status}")
+                    else:
+                        self.status_var.set(f"Checked in at {checkin_time} | Status: {status}")
+                else:
+                    self.status_var.set("Not checked in today")
+            else:
+                self.current_name = None
+                self.current_batch = None
+                self.name_var.set("Unknown")
+                self.batch_var.set("")
+                self.status_var.set("Staff ID not found")
+        else:
+            self.current_staff_id = None
+            self.current_name = None
+            self.current_batch = None
+            self.name_var.set("")
+            self.batch_var.set("")
+            self.status_var.set("Ready")
 
     def view_daily_log(self):
         """Open a window to display today's log file content."""
@@ -567,7 +596,6 @@ class AttendanceApp:
         win.title(f"Daily Log - {datetime.date.today().isoformat()}")
         win.geometry("700x500")
 
-        # Text widget with scrollbar
         frame = ttk.Frame(win)
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         text_widget = tk.Text(frame, wrap=tk.NONE, font=("Courier", 10))
@@ -580,7 +608,6 @@ class AttendanceApp:
         frame.grid_rowconfigure(0, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        # Load log content
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -589,7 +616,6 @@ class AttendanceApp:
         except Exception as e:
             text_widget.insert(tk.END, f"Error reading log: {str(e)}")
 
-        # Button to open folder
         btn_frame = ttk.Frame(win)
         btn_frame.pack(pady=5)
         ttk.Button(btn_frame, text="Open Log Folder", 
@@ -1426,8 +1452,20 @@ class AttendanceApp:
 
 
 # ---------- Main ----------
+def main():
+    try:
+        if not init_db():
+            return
+        root = tk.Tk()
+        app = AttendanceApp(root)
+        root.mainloop()
+    except Exception as e:
+        error_msg = f"Unhandled exception:\n{str(e)}\n\n{traceback.format_exc()}"
+        try:
+            messagebox.showerror("Fatal Error", error_msg)
+        except:
+            print(error_msg)
+        sys.exit(1)
+
 if __name__ == "__main__":
-    init_db()
-    root = tk.Tk()
-    app = AttendanceApp(root)
-    root.mainloop()
+    main()
