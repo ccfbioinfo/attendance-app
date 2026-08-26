@@ -1,8 +1,8 @@
 """
-Staff Duty Attendance System v5.5
-- Removed shift selection from checkout window.
-- Added leave reason checkboxes (Time Off, Annual Leave, Sick Leave, Other) for early leave.
-- Leave reason stored in database and displayed in reports.
+Staff Duty Attendance System v5.6
+- Enhanced Shift Code Reference with debug info.
+- Fixed missing shift selection in confirmation window.
+- Leave reason checkboxes for early leave.
 """
 
 import sqlite3
@@ -15,7 +15,6 @@ import csv
 import re
 import threading
 import shutil
-import time
 import traceback
 
 try:
@@ -150,7 +149,7 @@ def backup_and_reschedule():
     backup_db()
     schedule_backup()
 
-# ---------- Database Setup (with leave_reason column) ----------
+# ---------- Database Setup ----------
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -175,7 +174,6 @@ def init_db():
                 UNIQUE(staff_id, date)
             )
         ''')
-        # Check if leave_reason column exists, if not add it
         c.execute("PRAGMA table_info(attendance)")
         columns = [col[1] for col in c.fetchall()]
         if 'leave_reason' not in columns:
@@ -481,8 +479,8 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.5")
-        self.root.geometry("700x550")
+        self.root.title("Staff Attendance System v5.6")
+        self.root.geometry("900x700")
         self.show_db_path()
         self.confirm_dialog = None
         self.current_staff_id = None
@@ -492,6 +490,12 @@ class AttendanceApp:
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
         schedule_backup()
+
+        # Log shift count at startup
+        valid_shifts = [k for k, v in SHIFT_MAP.items() if v is not None]
+        write_log_to_file(f"Startup: Loaded {len(valid_shifts)} shift codes.")
+        if len(valid_shifts) == 0:
+            write_log_to_file("WARNING: SHIFT_MAP is empty!")
 
     def show_db_path(self):
         messagebox.showinfo("Database Location",
@@ -643,23 +647,28 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference ----------
+    # ---------- Shift Code Reference (enhanced) ----------
     def show_shift_reference(self):
         win = tk.Toplevel(self.root)
         win.title("Shift Code Reference")
-        win.geometry("600x450")
+        win.geometry("650x500")
 
         valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
         count = len(valid_shifts)
 
+        # Info label with count
         ttk.Label(win, text=f"Total shifts: {count}", font=("Arial", 10, "bold")).pack(pady=5)
 
         if count == 0:
-            ttk.Label(win, text="ERROR: No shift codes found!", font=("Arial", 12), foreground="red").pack(pady=20)
-            self.log_message("Shift Code Reference: No shifts found in SHIFT_MAP")
+            # Show error with details
+            keys = list(SHIFT_MAP.keys())
+            msg = f"No valid shifts found!\n\nKeys in SHIFT_MAP: {keys}\n\nPlease check the code."
+            messagebox.showerror("Shift Error", msg)
+            self.log_message(f"Shift Code Reference: No shifts found. Keys: {keys}")
             ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
             return
 
+        # Treeview
         tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
         tree.heading("Code", text="Shift Code")
         tree.heading("Start", text="Start Time")
@@ -824,11 +833,11 @@ class AttendanceApp:
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog (modified) ----------
+    # ---------- Confirmation Dialog (with shift selection restored) ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("650x550")  # slightly taller for leave reasons
+        dialog.geometry("650x550")
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -841,7 +850,7 @@ class AttendanceApp:
         if action_key == "checkin":
             countdown = None
         else:
-            countdown = 10
+            countdown = 30
 
         timer_id = None
 
@@ -861,30 +870,45 @@ class AttendanceApp:
         today = datetime.date.today().isoformat()
         existing_schedule = get_work_schedule_for_date(staff_id, today)
 
-        # Always show current schedule (read-only)
+        # ---- Shift Selection (always show) ----
+        shift_list = []
+        for code, times in SHIFT_MAP.items():
+            if times is not None:
+                start, end = times
+                shift_list.append(f"{code}: {start} - {end}")
+
+        current_code = None
         if existing_schedule:
             start, end = existing_schedule
-            code = None
-            for c, times in SHIFT_MAP.items():
+            for code, times in SHIFT_MAP.items():
                 if times and times[0] == start and times[1] == end:
-                    code = c
+                    current_code = code
                     break
-            if code:
-                display_text = f"{code}: {start} - {end}"
-            else:
-                display_text = f"{start} - {end}"
-            ttk.Label(dialog, text="Current Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
-        else:
-            ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
-        # Leave reason section (only for checkout/override, not for checkin)
+        ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+        if shift_list:
+            combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
+            combo.grid(row=4, column=1, padx=15, pady=8)
+            if current_code:
+                default_text = f"{current_code}: {existing_schedule[0]} - {existing_schedule[1]}"
+                if default_text in shift_list:
+                    combo.set(default_text)
+                else:
+                    combo.current(0)
+            else:
+                combo.current(0)
+            shift_combo = combo
+        else:
+            ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
+            shift_combo = None
+            self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
+
+        # ---- Leave Reason (only for checkout/override) ----
         leave_vars = []
         leave_frame = None
         if action_key in ("checkout", "override"):
             leave_frame = ttk.LabelFrame(dialog, text="早退原因 (Leave Reasons)", padding=10)
             leave_frame.grid(row=5, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
-            # Checkboxes
             reasons = ["Time Off", "Annual Leave", "Sick Leave", "Other"]
             for i, reason in enumerate(reasons):
                 var = tk.BooleanVar()
@@ -892,7 +916,7 @@ class AttendanceApp:
                 cb.grid(row=i, column=0, padx=5, pady=2, sticky=tk.W)
                 leave_vars.append((reason, var))
 
-        # Countdown label
+        # Countdown
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
@@ -916,8 +940,16 @@ class AttendanceApp:
                 return ', '.join(selected) if selected else ''
             return ''
 
-        def perform_action(leave_reason=''):
-            # Perform main action
+        def perform_action(selected_shift=None, leave_reason=''):
+            # Update schedule if shift selected
+            if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
+                start, end = SHIFT_MAP[selected_shift]
+                if upsert_work_schedule(staff_id, today, today, start, end):
+                    self.log_message(f"Updated shift to {selected_shift} ({start}-{end}) for today")
+                else:
+                    self.log_message("Failed to update shift schedule")
+
+            # Main action
             success = False
             try:
                 if action_key == "checkin":
@@ -933,7 +965,6 @@ class AttendanceApp:
                     else:
                         self.log_message("Failed to record checkout (database error)")
                 elif action_key == "override":
-                    # Override: we don't store leave reason as it's a new checkin
                     success = override_checkin(staff_id, current_time)
                     if success:
                         self.log_message(f"Overrode check‑in at {current_time} (previous checkout cleared)")
@@ -954,8 +985,14 @@ class AttendanceApp:
             if timer_id:
                 dialog.after_cancel(timer_id)
                 timer_id = None
+            selected_shift = None
+            if shift_combo:
+                selected_text = shift_combo.get()
+                if selected_text:
+                    code = selected_text.split(':')[0].strip()
+                    selected_shift = code
             leave_reason = get_leave_reason() if leave_frame else ''
-            perform_action(leave_reason)
+            perform_action(selected_shift, leave_reason)
             reset_after_dialog()
             dialog.destroy()
 
@@ -980,8 +1017,14 @@ class AttendanceApp:
             if countdown <= 0:
                 if timer_id:
                     timer_id = None
+                selected_shift = None
+                if shift_combo:
+                    selected_text = shift_combo.get()
+                    if selected_text:
+                        code = selected_text.split(':')[0].strip()
+                        selected_shift = code
                 leave_reason = get_leave_reason() if leave_frame else ''
-                perform_action(leave_reason)
+                perform_action(selected_shift, leave_reason)
                 reset_after_dialog()
                 dialog.destroy()
                 return
