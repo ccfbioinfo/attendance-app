@@ -1,8 +1,8 @@
 """
-Staff Duty Attendance System v5.4
-- Fixed Shift Code Reference (now shows shifts and debug info).
-- Added Export Staff function in Manage Staff window.
-- Enhanced error logging for checkin/checkout.
+Staff Duty Attendance System v5.5
+- Removed shift selection from checkout window.
+- Added leave reason checkboxes (Time Off, Annual Leave, Sick Leave, Other) for early leave.
+- Leave reason stored in database and displayed in reports.
 """
 
 import sqlite3
@@ -66,12 +66,6 @@ for code, start, end in SHIFT_ENTRIES:
 REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
-
-# Debug: log shift count to file (will be shown in daily log)
-try:
-    write_log_to_file(f"Shift codes loaded: {len([k for k, v in SHIFT_MAP.items() if v is not None])}")
-except:
-    pass
 
 # ---------- Helper Functions ----------
 def pad_time(t):
@@ -156,7 +150,7 @@ def backup_and_reschedule():
     backup_db()
     schedule_backup()
 
-# ---------- Database Setup ----------
+# ---------- Database Setup (with leave_reason column) ----------
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -176,10 +170,16 @@ def init_db():
                 checkin TEXT,
                 checkout TEXT,
                 status TEXT,
+                leave_reason TEXT,
                 FOREIGN KEY (staff_id) REFERENCES staff(staff_id),
                 UNIQUE(staff_id, date)
             )
         ''')
+        # Check if leave_reason column exists, if not add it
+        c.execute("PRAGMA table_info(attendance)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'leave_reason' not in columns:
+            c.execute("ALTER TABLE attendance ADD COLUMN leave_reason TEXT")
         c.execute('''
             CREATE TABLE IF NOT EXISTS work_schedule (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,7 +267,7 @@ def get_today_attendance(staff_id):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT checkin, checkout, status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
+        c.execute("SELECT checkin, checkout, status, leave_reason FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         conn.close()
         return row
@@ -280,7 +280,6 @@ def set_checkin(staff_id, time_str):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        # Get existing status
         c.execute("SELECT status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         existing_status = row[0] if row else ''
@@ -289,9 +288,9 @@ def set_checkin(staff_id, time_str):
             tags.append('Checked In')
         new_status = ', '.join(tags) if tags else 'Checked In'
         c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status)
-            VALUES (?, ?, ?, NULL, ?)
-        ''', (staff_id, today, time_str, new_status))
+            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status, leave_reason)
+            VALUES (?, ?, ?, NULL, ?, ?)
+        ''', (staff_id, today, time_str, new_status, ''))
         conn.commit()
         conn.close()
         return True
@@ -299,7 +298,7 @@ def set_checkin(staff_id, time_str):
         write_log_to_file(f"set_checkin error: {e}")
         return False
 
-def set_checkout(staff_id, time_str):
+def set_checkout(staff_id, time_str, leave_reason=''):
     try:
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
@@ -367,9 +366,9 @@ def set_checkout(staff_id, time_str):
             new_status = ', '.join(unique_tags)
 
             c.execute('''
-                UPDATE attendance SET checkout=?, status=?
+                UPDATE attendance SET checkout=?, status=?, leave_reason=?
                 WHERE staff_id=? AND date=?
-            ''', (time_str, new_status, staff_id, today))
+            ''', (time_str, new_status, leave_reason, staff_id, today))
             conn.commit()
             conn.close()
             return True
@@ -387,7 +386,7 @@ def override_checkin(staff_id, time_str):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            UPDATE attendance SET checkin=?, checkout=NULL, status=?
+            UPDATE attendance SET checkin=?, checkout=NULL, status=?, leave_reason=''
             WHERE staff_id=? AND date=?
         ''', (time_str, 'Override', staff_id, today))
         conn.commit()
@@ -402,9 +401,9 @@ def upsert_attendance(staff_id, date_str, checkin, checkout):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (staff_id, date_str, checkin, checkout, ''))
+            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status, leave_reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (staff_id, date_str, checkin, checkout, '', ''))
         conn.commit()
         conn.close()
         return True
@@ -454,7 +453,7 @@ def get_monthly_attendance(year, month):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            SELECT s.staff_id, s.name, s.batch, a.date, a.checkin, a.checkout, a.status
+            SELECT s.staff_id, s.name, s.batch, a.date, a.checkin, a.checkout, a.status, a.leave_reason
             FROM attendance a
             JOIN staff s ON a.staff_id = s.staff_id
             WHERE a.date >= ? AND a.date < ?
@@ -482,7 +481,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.4")
+        self.root.title("Staff Attendance System v5.5")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -547,7 +546,6 @@ class AttendanceApp:
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def log_message(self, msg):
-        """Log message to UI and to daily log file."""
         self.log_text.config(state=tk.NORMAL)
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
         full_msg = f"{timestamp} - {msg}\n"
@@ -557,7 +555,6 @@ class AttendanceApp:
         write_log_to_file(msg)
 
     def update_status(self, staff_id=None):
-        """Update the staff info and status display."""
         if staff_id:
             self.current_staff_id = staff_id
             staff = get_staff(staff_id)
@@ -571,8 +568,10 @@ class AttendanceApp:
                     checkin_time = att[0]
                     checkout_time = att[1]
                     status = att[2]
+                    leave_reason = att[3]
                     if checkout_time:
-                        self.status_var.set(f"Checked out at {checkout_time} | Status: {status}")
+                        reason_display = f" | Leave: {leave_reason}" if leave_reason else ""
+                        self.status_var.set(f"Checked out at {checkout_time} | Status: {status}{reason_display}")
                     else:
                         self.status_var.set(f"Checked in at {checkin_time} | Status: {status}")
                 else:
@@ -592,7 +591,6 @@ class AttendanceApp:
             self.status_var.set("Ready")
 
     def view_daily_log(self):
-        """Open a window to display today's log file content."""
         log_path = get_today_log_path()
         if not os.path.exists(log_path):
             messagebox.showinfo("No Log", "No log entries for today yet.")
@@ -645,29 +643,23 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference (fixed with debug) ----------
+    # ---------- Shift Code Reference ----------
     def show_shift_reference(self):
         win = tk.Toplevel(self.root)
         win.title("Shift Code Reference")
         win.geometry("600x450")
 
-        # Debug: show shift count
         valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
         count = len(valid_shifts)
 
-        # Info label
-        info_label = ttk.Label(win, text=f"Total shifts: {count}", font=("Arial", 10, "bold"))
-        info_label.pack(pady=5)
+        ttk.Label(win, text=f"Total shifts: {count}", font=("Arial", 10, "bold")).pack(pady=5)
 
         if count == 0:
-            ttk.Label(win, text="ERROR: No shift codes found! Please check the code.",
-                      font=("Arial", 12), foreground="red").pack(pady=20)
-            # Also log this
+            ttk.Label(win, text="ERROR: No shift codes found!", font=("Arial", 12), foreground="red").pack(pady=20)
             self.log_message("Shift Code Reference: No shifts found in SHIFT_MAP")
             ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
             return
 
-        # Treeview
         tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
         tree.heading("Code", text="Shift Code")
         tree.heading("Start", text="Start Time")
@@ -677,7 +669,6 @@ class AttendanceApp:
         for code, start, end in valid_shifts:
             tree.insert("", tk.END, values=(code, start, end))
 
-        # Rest codes
         rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
         if rest_codes:
             ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}",
@@ -833,11 +824,11 @@ class AttendanceApp:
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog ----------
+    # ---------- Confirmation Dialog (modified) ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("650x450")
+        dialog.geometry("650x550")  # slightly taller for leave reasons
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -854,6 +845,7 @@ class AttendanceApp:
 
         timer_id = None
 
+        # Staff info
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
         ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
 
@@ -868,45 +860,47 @@ class AttendanceApp:
 
         today = datetime.date.today().isoformat()
         existing_schedule = get_work_schedule_for_date(staff_id, today)
-        shift_combo = None
 
-        shift_list = []
-        for code, times in SHIFT_MAP.items():
-            if times is not None:
-                start, end = times
-                shift_list.append(f"{code}: {start} - {end}")
-
-        current_code = None
+        # Always show current schedule (read-only)
         if existing_schedule:
             start, end = existing_schedule
-            for code, times in SHIFT_MAP.items():
+            code = None
+            for c, times in SHIFT_MAP.items():
                 if times and times[0] == start and times[1] == end:
-                    current_code = code
+                    code = c
                     break
-
-        ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-        if shift_list:
-            combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
-            combo.grid(row=4, column=1, padx=15, pady=8)
-            if current_code:
-                default_text = f"{current_code}: {existing_schedule[0]} - {existing_schedule[1]}"
-                if default_text in shift_list:
-                    combo.set(default_text)
-                else:
-                    combo.current(0)
+            if code:
+                display_text = f"{code}: {start} - {end}"
             else:
-                combo.current(0)
-            shift_combo = combo
+                display_text = f"{start} - {end}"
+            ttk.Label(dialog, text="Current Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
         else:
-            ttk.Label(dialog, text="No shifts defined.", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
+            ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
+        # Leave reason section (only for checkout/override, not for checkin)
+        leave_vars = []
+        leave_frame = None
+        if action_key in ("checkout", "override"):
+            leave_frame = ttk.LabelFrame(dialog, text="早退原因 (Leave Reasons)", padding=10)
+            leave_frame.grid(row=5, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
+            # Checkboxes
+            reasons = ["Time Off", "Annual Leave", "Sick Leave", "Other"]
+            for i, reason in enumerate(reasons):
+                var = tk.BooleanVar()
+                cb = ttk.Checkbutton(leave_frame, text=reason, variable=var)
+                cb.grid(row=i, column=0, padx=5, pady=2, sticky=tk.W)
+                leave_vars.append((reason, var))
+
+        # Countdown label
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
-            countdown_label.grid(row=5, column=0, columnspan=2, pady=15)
+            countdown_label.grid(row=6, column=0, columnspan=2, pady=15)
 
+        # Buttons
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=7, column=0, columnspan=2, pady=20)
 
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
@@ -916,15 +910,13 @@ class AttendanceApp:
             if timer_id:
                 dialog.after_cancel(timer_id)
 
-        def perform_action_with_shift(selected_shift=None):
-            # Update schedule if shift selected
-            if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
-                start, end = SHIFT_MAP[selected_shift]
-                if upsert_work_schedule(staff_id, today, today, start, end):
-                    self.log_message(f"Updated shift to {selected_shift} ({start}-{end}) for today")
-                else:
-                    self.log_message("Failed to update shift schedule")
+        def get_leave_reason():
+            if leave_vars:
+                selected = [reason for reason, var in leave_vars if var.get()]
+                return ', '.join(selected) if selected else ''
+            return ''
 
+        def perform_action(leave_reason=''):
             # Perform main action
             success = False
             try:
@@ -935,12 +927,13 @@ class AttendanceApp:
                     else:
                         self.log_message("Failed to record checkin (database error)")
                 elif action_key == "checkout":
-                    success = set_checkout(staff_id, current_time)
+                    success = set_checkout(staff_id, current_time, leave_reason)
                     if success:
-                        self.log_message(f"Checked out at {current_time}")
+                        self.log_message(f"Checked out at {current_time} | Leave Reason: {leave_reason or 'None'}")
                     else:
                         self.log_message("Failed to record checkout (database error)")
                 elif action_key == "override":
+                    # Override: we don't store leave reason as it's a new checkin
                     success = override_checkin(staff_id, current_time)
                     if success:
                         self.log_message(f"Overrode check‑in at {current_time} (previous checkout cleared)")
@@ -961,13 +954,8 @@ class AttendanceApp:
             if timer_id:
                 dialog.after_cancel(timer_id)
                 timer_id = None
-            selected_shift = None
-            if shift_combo:
-                selected_text = shift_combo.get()
-                if selected_text:
-                    code = selected_text.split(':')[0].strip()
-                    selected_shift = code
-            perform_action_with_shift(selected_shift)
+            leave_reason = get_leave_reason() if leave_frame else ''
+            perform_action(leave_reason)
             reset_after_dialog()
             dialog.destroy()
 
@@ -992,13 +980,8 @@ class AttendanceApp:
             if countdown <= 0:
                 if timer_id:
                     timer_id = None
-                selected_shift = None
-                if shift_combo:
-                    selected_text = shift_combo.get()
-                    if selected_text:
-                        code = selected_text.split(':')[0].strip()
-                        selected_shift = code
-                perform_action_with_shift(selected_shift)
+                leave_reason = get_leave_reason() if leave_frame else ''
+                perform_action(leave_reason)
                 reset_after_dialog()
                 dialog.destroy()
                 return
@@ -1012,7 +995,7 @@ class AttendanceApp:
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management (with Export) ----------
+    # ---------- Staff Management ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1111,7 +1094,6 @@ class AttendanceApp:
                     messagebox.showerror("Error", f"Failed to delete staff: {str(e)}")
 
         def export_staff():
-            """Export all staff to CSV."""
             try:
                 file_path = filedialog.asksaveasfilename(
                     defaultextension=".csv",
@@ -1217,11 +1199,11 @@ class AttendanceApp:
                     conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
                     c.execute('''
-                        SELECT date, checkin, checkout, status
+                        SELECT date, checkin, checkout, status, leave_reason
                         FROM attendance
                         WHERE staff_id=? AND date >= ? AND date < ?
                     ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
-                    records = {row[0]: (row[1], row[2], row[3]) for row in c.fetchall()}
+                    records = {row[0]: (row[1], row[2], row[3], row[4]) for row in c.fetchall()}
                     conn.close()
                 except Exception as e:
                     self.log_message(f"Error loading attendance for {name}: {e}")
@@ -1235,16 +1217,16 @@ class AttendanceApp:
                         work_start, work_end = WORK_START, WORK_END
 
                     if date_str in records:
-                        checkin, checkout, status = records[date_str]
+                        checkin, checkout, status, leave_reason = records[date_str]
                         if status:
                             status_lower = status.lower()
                             if 'late' in status_lower or 'early leave' in status_lower or 'forgot' in status_lower or 'no checkout' in status_lower or 'no checkin' in status_lower:
                                 exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                                exceptions[staff_id]['days'].append((date_str, status, f"Checkin: {checkin}, Checkout: {checkout}"))
+                                exceptions[staff_id]['days'].append((date_str, status, f"Checkin: {checkin}, Checkout: {checkout}", leave_reason))
                     else:
                         if schedule:
                             exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                            exceptions[staff_id]['days'].append((date_str, "Forgot Check", "No check-in/out recorded"))
+                            exceptions[staff_id]['days'].append((date_str, "Forgot Check", "No check-in/out recorded", ""))
 
             if not exceptions:
                 messagebox.showinfo("All Good", "No exceptions found for this month.")
@@ -1252,24 +1234,26 @@ class AttendanceApp:
 
             result_win = tk.Toplevel(win)
             result_win.title(f"Exception Report - {year}-{month:02d}")
-            result_win.geometry("900x500")
+            result_win.geometry("950x500")
 
-            tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Detail"), show="headings")
+            tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Detail", "Leave Reason"), show="headings")
             tree.heading("Staff", text="Staff (ID)")
             tree.heading("Batch", text="Batch")
             tree.heading("Date", text="Date")
             tree.heading("Issue", text="Issue Type")
             tree.heading("Detail", text="Detail")
+            tree.heading("Leave Reason", text="Leave Reason")
             tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
             for staff_id, data in exceptions.items():
-                for date_str, issue, detail in data['days']:
+                for date_str, issue, detail, leave_reason in data['days']:
                     tree.insert("", tk.END, values=(
                         f"{data['name']} ({staff_id})",
                         data['batch'] or "-",
                         date_str,
                         issue,
-                        detail
+                        detail,
+                        leave_reason or "-"
                     ))
 
             def export_exceptions():
@@ -1280,10 +1264,10 @@ class AttendanceApp:
                 try:
                     with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                         writer = csv.writer(f)
-                        writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Detail"])
+                        writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Detail", "Leave Reason"])
                         for staff_id, data in exceptions.items():
-                            for date_str, issue, detail in data['days']:
-                                writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue, detail])
+                            for date_str, issue, detail, leave_reason in data['days']:
+                                writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue, detail, leave_reason])
                     messagebox.showinfo("Export", f"Report exported to {file_path}")
                 except Exception as e:
                     messagebox.showerror("Error", f"Export failed: {str(e)}")
@@ -1352,11 +1336,11 @@ class AttendanceApp:
                     conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
                     c.execute('''
-                        SELECT date, checkin, checkout, status
+                        SELECT date, checkin, checkout, status, leave_reason
                         FROM attendance
                         WHERE staff_id=? AND date >= ? AND date < ?
                     ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
-                    records = {row[0]: (row[1], row[2], row[3]) for row in c.fetchall()}
+                    records = {row[0]: (row[1], row[2], row[3], row[4]) for row in c.fetchall()}
                     conn.close()
                 except Exception as e:
                     self.log_message(f"Error loading attendance for {name}: {e}")
@@ -1373,7 +1357,7 @@ class AttendanceApp:
                     work_end = pad_time(work_end)
 
                     if date_str in records:
-                        checkin, checkout, status = records[date_str]
+                        checkin, checkout, status, leave_reason = records[date_str]
                         if checkin and checkout:
                             work_hrs = calculate_work_hours(checkin, checkout)
                             try:
@@ -1409,6 +1393,7 @@ class AttendanceApp:
                                 "Status": status or "Normal",
                                 "Checkin Deviation (min)": checkin_dev if checkin_dev is not None else "-",
                                 "Checkout Deviation (min)": checkout_dev if checkout_dev is not None else "-",
+                                "Leave Reason": leave_reason or "",
                             })
                         elif checkin and not checkout:
                             report_data.append({
@@ -1422,6 +1407,7 @@ class AttendanceApp:
                                 "Status": status or "No Checkout Record",
                                 "Checkin Deviation (min)": "-",
                                 "Checkout Deviation (min)": "-",
+                                "Leave Reason": "",
                             })
                         elif not checkin and checkout:
                             report_data.append({
@@ -1435,6 +1421,7 @@ class AttendanceApp:
                                 "Status": status or "No Checkin Record",
                                 "Checkin Deviation (min)": "-",
                                 "Checkout Deviation (min)": "-",
+                                "Leave Reason": "",
                             })
                         else:
                             report_data.append({
@@ -1448,6 +1435,7 @@ class AttendanceApp:
                                 "Status": status or "Forgot Check",
                                 "Checkin Deviation (min)": "-",
                                 "Checkout Deviation (min)": "-",
+                                "Leave Reason": "",
                             })
                     else:
                         if schedule:
@@ -1462,6 +1450,7 @@ class AttendanceApp:
                                 "Status": "Forgot Check",
                                 "Checkin Deviation (min)": "-",
                                 "Checkout Deviation (min)": "-",
+                                "Leave Reason": "",
                             })
                         else:
                             report_data.append({
@@ -1475,6 +1464,7 @@ class AttendanceApp:
                                 "Status": "Off Day",
                                 "Checkin Deviation (min)": "-",
                                 "Checkout Deviation (min)": "-",
+                                "Leave Reason": "",
                             })
 
             if not report_data:
@@ -1492,7 +1482,7 @@ class AttendanceApp:
             try:
                 with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                     fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout",
-                                  "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)"]
+                                  "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)", "Leave Reason"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
                     writer.writerows(report_data)
