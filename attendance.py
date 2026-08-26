@@ -1,9 +1,8 @@
 """
-Staff Duty Attendance System v5.7
-- Removed Import Roster and Shift Code Reference buttons.
-- Added shift_code column to attendance table.
-- Clock-in window shows shift selection; Clock-out window shows only leave reasons.
-- Updated terminology: check-in/out -> clock-in/out.
+Staff Duty Attendance System v5.9
+- Import Staff button moved to Add/Edit Staff window.
+- Removed Import Staff from main window.
+- All other features preserved.
 """
 
 import sqlite3
@@ -18,7 +17,6 @@ import threading
 import shutil
 import traceback
 
-# Note: openpyxl is no longer required (roster import removed), but keep import for potential future use.
 try:
     from openpyxl import load_workbook
     HAS_OPENPYXL = True
@@ -177,7 +175,6 @@ def init_db():
                 UNIQUE(staff_id, date)
             )
         ''')
-        # Add columns if missing
         c.execute("PRAGMA table_info(attendance)")
         columns = [col[1] for col in c.fetchall()]
         if 'leave_reason' not in columns:
@@ -485,8 +482,8 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.7")
-        self.root.geometry("900x700")
+        self.root.title("Staff Attendance System v5.9")
+        self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
         self.current_staff_id = None
@@ -535,7 +532,7 @@ class AttendanceApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
-        # Removed Import Roster and Shift Code Reference buttons
+        # Removed "Import Staff" from main window
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="View Daily Log", command=self.view_daily_log).pack(side=tk.LEFT, padx=5)
@@ -596,6 +593,7 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
+    # ---------- View Daily Log ----------
     def view_daily_log(self):
         log_path = get_today_log_path()
         if not os.path.exists(log_path):
@@ -705,9 +703,8 @@ class AttendanceApp:
         self.scan_btn.config(state=tk.DISABLED)
         self.confirm_dialog = dialog
 
-        # Countdown only for clock-out/override? No, override is like clock-in, so no countdown. Clock-out has countdown.
         if action_key == "checkout":
-            countdown = 30
+            countdown = 10
         else:
             countdown = None
 
@@ -728,10 +725,9 @@ class AttendanceApp:
 
         today = datetime.date.today().isoformat()
 
-        # ---- Shift Selection (only for clock-in and override) ----
+        # Shift Selection (only for clock-in and override)
         shift_combo = None
         if action_key in ("checkin", "override"):
-            # Get current schedule if exists
             existing_schedule = get_work_schedule_for_date(staff_id, today)
             shift_list = []
             for code, times in SHIFT_MAP.items():
@@ -764,7 +760,7 @@ class AttendanceApp:
                 ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
                 self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
         else:
-            # For clock-out, display current schedule (read-only) and no combo
+            # For clock-out, display current schedule (read-only)
             existing_schedule = get_work_schedule_for_date(staff_id, today)
             if existing_schedule:
                 start, end = existing_schedule
@@ -782,12 +778,11 @@ class AttendanceApp:
             else:
                 ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
-        # ---- Leave Reason (only for clock-out/override? Override is like clock-in, but may also need leave reason? We'll keep for checkout only) ----
+        # Leave Reason (only for clock-out)
         leave_vars = []
         leave_frame = None
         if action_key == "checkout":
             leave_frame = ttk.LabelFrame(dialog, text="Early Leave Reasons", padding=10)
-            # For checkout, we place it after the schedule row (row 5)
             leave_frame.grid(row=5, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
             reasons = ["CO", "Annual Leave", "Sick Leave", "Other"]
             for i, reason in enumerate(reasons):
@@ -796,34 +791,15 @@ class AttendanceApp:
                 cb.grid(row=i, column=0, padx=5, pady=2, sticky=tk.W)
                 leave_vars.append((reason, var))
 
-        # Countdown label
+        # Countdown
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
             countdown_label.grid(row=6, column=0, columnspan=2, pady=15)
-        else:
-            # For clock-in, no countdown, but we need to place the countdown label row empty or shift buttons up?
-            # We'll leave a spacer or just place buttons at row 6.
-            pass
 
-        # Buttons row
-        btn_row = 6 if countdown is not None else 5  # if no countdown, buttons go to row 5 (since leave_frame might be at row 5)
-        # Actually adjust: if leave_frame exists, it's row 5, countdown row 6, buttons row 7. If no leave_frame and no countdown, buttons row 5.
-        # Let's use dynamic positioning.
-        row_counter = 4  # after staff info
-        # Schedule row
-        row_counter += 1
-        # Leave reason row (if checkout)
-        if leave_frame:
-            row_counter += 1
-        # Countdown row (if any)
-        if countdown is not None:
-            row_counter += 1
-        # Buttons row
-        btn_row = row_counter + 1
-
+        # Buttons
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=btn_row, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=7, column=0, columnspan=2, pady=20)
 
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
@@ -840,7 +816,6 @@ class AttendanceApp:
             return ''
 
         def perform_action(selected_shift=None, leave_reason=''):
-            # Update schedule if shift selected (only for clock-in/override)
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
                 start, end = SHIFT_MAP[selected_shift]
                 if upsert_work_schedule(staff_id, today, today, start, end):
@@ -848,7 +823,6 @@ class AttendanceApp:
                 else:
                     self.log_message("Failed to update shift schedule")
 
-            # Main action
             success = False
             try:
                 if action_key == "checkin":
@@ -937,7 +911,7 @@ class AttendanceApp:
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management ----------
+    # ---------- Staff Management (with Import Staff inside) ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -947,7 +921,7 @@ class AttendanceApp:
     def _open_manage_staff(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Staff")
-        win.geometry("550x450")
+        win.geometry("600x450")
 
         tree = ttk.Treeview(win, columns=("ID", "Name", "Batch"), show="headings")
         tree.heading("ID", text="Staff ID")
@@ -1060,13 +1034,91 @@ class AttendanceApp:
             except Exception as e:
                 messagebox.showerror("Error", f"Export failed: {str(e)}")
 
+        def import_staff():
+            """Import staff from CSV (same format as export)."""
+            file_path = filedialog.askopenfilename(
+                title="Select staff CSV file",
+                filetypes=[("CSV files", "*.csv")]
+            )
+            if not file_path:
+                return
+
+            try:
+                with open(file_path, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    if header:
+                        # Check if first row looks like header
+                        if len(header) >= 3 and (header[0].lower().strip() in ['staff id', 'id']):
+                            # header exists, data starts from next row
+                            pass
+                        else:
+                            # No header, rewind
+                            f.seek(0)
+                            reader = csv.reader(f)
+                    else:
+                        messagebox.showerror("Error", "File is empty.")
+                        return
+
+                    count_imported = 0
+                    count_updated = 0
+                    errors = []
+
+                    for row_num, row in enumerate(reader, start=2):
+                        if len(row) < 3:
+                            errors.append(f"Row {row_num}: Skipped (insufficient columns: {len(row)})")
+                            continue
+                        staff_id = row[0].strip()
+                        name = row[1].strip()
+                        batch = row[2].strip() if len(row) > 2 else ''
+                        if not staff_id or not name:
+                            errors.append(f"Row {row_num}: Skipped (missing staff ID or name)")
+                            continue
+
+                        existing = get_staff(staff_id)
+                        if existing:
+                            try:
+                                conn = sqlite3.connect(DB_PATH)
+                                c = conn.cursor()
+                                c.execute("UPDATE staff SET name=?, batch=? WHERE staff_id=?", (name, batch, staff_id))
+                                conn.commit()
+                                conn.close()
+                                count_updated += 1
+                            except Exception as e:
+                                errors.append(f"Row {row_num}: Update failed - {str(e)}")
+                        else:
+                            try:
+                                conn = sqlite3.connect(DB_PATH)
+                                c = conn.cursor()
+                                c.execute("INSERT INTO staff (staff_id, name, batch) VALUES (?, ?, ?)",
+                                          (staff_id, name, batch))
+                                conn.commit()
+                                conn.close()
+                                count_imported += 1
+                            except Exception as e:
+                                errors.append(f"Row {row_num}: Insert failed - {str(e)}")
+
+                    msg = f"Import completed.\n\nNew staff added: {count_imported}\nStaff updated: {count_updated}\n"
+                    if errors:
+                        msg += f"\nErrors ({len(errors)}):\n" + "\n".join(errors[:10])
+                        if len(errors) > 10:
+                            msg += f"\n... and {len(errors)-10} more errors."
+                    messagebox.showinfo("Import Results", msg)
+                    self.log_message(f"Import staff: Added {count_imported}, Updated {count_updated}, Errors {len(errors)}")
+                    refresh_staff_list()  # Refresh the treeview
+
+            except Exception as e:
+                messagebox.showerror("Import Error", f"Failed to import staff:\n{str(e)}")
+                self.log_message(f"Import staff failed: {str(e)}")
+
         ttk.Button(btn_frame, text="Add", command=add_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Edit", command=edit_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Export Staff", command=export_staff).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Import Staff", command=import_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
-    # ---------- Add New Staff ----------
+    # ---------- Add New Staff (quick) ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
