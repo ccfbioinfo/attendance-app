@@ -1,9 +1,9 @@
 """
-Staff Duty Attendance System v5.2
-- Fixed attribute error for update_status.
-- Added exception handling to prevent silent crashes.
+Staff Duty Attendance System v5.3
+- Fixed Shift Code Reference (now displays all shifts).
+- Enhanced error logging for checkin/checkout.
+- Added exception handling to prevent silent failures.
 - Daily activity log stored in backup folder.
-- View Daily Log button.
 """
 
 import sqlite3
@@ -67,6 +67,9 @@ for code, start, end in SHIFT_ENTRIES:
 REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
+
+# Print shift count for debugging
+print(f"[INFO] Loaded {len([k for k, v in SHIFT_MAP.items() if v is not None])} shift codes.")
 
 # ---------- Helper Functions ----------
 def pad_time(t):
@@ -275,6 +278,7 @@ def set_checkin(staff_id, time_str):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        # Get existing status
         c.execute("SELECT status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         existing_status = row[0] if row else ''
@@ -476,7 +480,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.2")
+        self.root.title("Staff Attendance System v5.3")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -485,7 +489,7 @@ class AttendanceApp:
         self.current_batch = None
         self.create_widgets()
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
-        self.update_status()  # <-- 方法名正确
+        self.update_status()
         schedule_backup()
 
     def show_db_path(self):
@@ -618,7 +622,7 @@ class AttendanceApp:
 
         btn_frame = ttk.Frame(win)
         btn_frame.pack(pady=5)
-        ttk.Button(btn_frame, text="Open Log Folder", 
+        ttk.Button(btn_frame, text="Open Log Folder",
                    command=lambda: os.startfile(os.path.dirname(log_path)) if os.name == 'nt' else \
                        messagebox.showinfo("Info", f"Log folder: {os.path.dirname(log_path)}")).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.LEFT, padx=5)
@@ -639,11 +643,21 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference ----------
+    # ---------- Shift Code Reference (fixed) ----------
     def show_shift_reference(self):
         win = tk.Toplevel(self.root)
         win.title("Shift Code Reference")
-        win.geometry("500x400")
+        win.geometry("550x450")
+
+        # Display count
+        valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
+        count_label = ttk.Label(win, text=f"Total shifts: {len(valid_shifts)}", font=("Arial", 10))
+        count_label.pack(pady=5)
+
+        if not valid_shifts:
+            ttk.Label(win, text="No shift codes found! Please check SHIFT_MAP.", font=("Arial", 12), foreground="red").pack(pady=20)
+            ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
+            return
 
         tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
         tree.heading("Code", text="Shift Code")
@@ -651,16 +665,12 @@ class AttendanceApp:
         tree.heading("End", text="End Time")
         tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
-        if not valid_shifts:
-            ttk.Label(win, text="No shift codes found.", font=("Arial", 12), foreground="red").pack(pady=20)
-        else:
-            for code, start, end in valid_shifts:
-                tree.insert("", tk.END, values=(code, start, end))
+        for code, start, end in valid_shifts:
+            tree.insert("", tk.END, values=(code, start, end))
 
         rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
         if rest_codes:
-            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}", 
+            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}",
                       font=("Arial", 10), foreground="gray").pack(pady=5)
 
         ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
@@ -897,6 +907,7 @@ class AttendanceApp:
                 dialog.after_cancel(timer_id)
 
         def perform_action_with_shift(selected_shift=None):
+            # Update schedule if shift selected
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
                 start, end = SHIFT_MAP[selected_shift]
                 if upsert_work_schedule(staff_id, today, today, start, end):
@@ -904,27 +915,32 @@ class AttendanceApp:
                 else:
                     self.log_message("Failed to update shift schedule")
 
+            # Perform main action
             success = False
-            if action_key == "checkin":
-                success = set_checkin(staff_id, current_time)
-                if success:
-                    self.log_message(f"Checked in at {current_time}")
+            try:
+                if action_key == "checkin":
+                    success = set_checkin(staff_id, current_time)
+                    if success:
+                        self.log_message(f"Checked in at {current_time}")
+                    else:
+                        self.log_message("Failed to record checkin (database error)")
+                elif action_key == "checkout":
+                    success = set_checkout(staff_id, current_time)
+                    if success:
+                        self.log_message(f"Checked out at {current_time}")
+                    else:
+                        self.log_message("Failed to record checkout (database error)")
+                elif action_key == "override":
+                    success = override_checkin(staff_id, current_time)
+                    if success:
+                        self.log_message(f"Overrode check‑in at {current_time} (previous checkout cleared)")
+                    else:
+                        self.log_message("Failed to override checkin (database error)")
                 else:
-                    self.log_message("Failed to record checkin")
-            elif action_key == "checkout":
-                success = set_checkout(staff_id, current_time)
-                if success:
-                    self.log_message(f"Checked out at {current_time}")
-                else:
-                    self.log_message("Failed to record checkout")
-            elif action_key == "override":
-                success = override_checkin(staff_id, current_time)
-                if success:
-                    self.log_message(f"Overrode check‑in at {current_time} (previous checkout cleared)")
-                else:
-                    self.log_message("Failed to override checkin")
-            else:
-                self.log_message("Unknown action – nothing stored")
+                    self.log_message("Unknown action – nothing stored")
+                    success = False
+            except Exception as e:
+                self.log_message(f"Error during action: {str(e)}")
                 success = False
 
             if success:
@@ -1438,7 +1454,7 @@ class AttendanceApp:
 
             try:
                 with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
-                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout", 
+                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout",
                                   "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
