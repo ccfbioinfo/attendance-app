@@ -1,9 +1,9 @@
 """
 Staff Duty Attendance System v5.7
 - Removed Import Roster and Shift Code Reference buttons.
-- Added selected_shift column to attendance table.
-- clock-out window: removed shift selection, only leave reason checkboxes.
-- clock-in window: still allows shift selection for assignment.
+- Added shift_code column to attendance table.
+- Clock-in window shows shift selection; Clock-out window shows only leave reasons.
+- Updated terminology: check-in/out -> clock-in/out.
 """
 
 import sqlite3
@@ -18,6 +18,7 @@ import threading
 import shutil
 import traceback
 
+# Note: openpyxl is no longer required (roster import removed), but keep import for potential future use.
 try:
     from openpyxl import load_workbook
     HAS_OPENPYXL = True
@@ -150,7 +151,7 @@ def backup_and_reschedule():
     backup_db()
     schedule_backup()
 
-# ---------- Database Setup (add selected_shift column) ----------
+# ---------- Database Setup ----------
 def init_db():
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -167,23 +168,22 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 staff_id TEXT NOT NULL,
                 date TEXT NOT NULL,
-                clock-in TEXT,
-                clock-out TEXT,
+                checkin TEXT,
+                checkout TEXT,
                 status TEXT,
                 leave_reason TEXT,
-                selected_shift TEXT,
+                shift_code TEXT,
                 FOREIGN KEY (staff_id) REFERENCES staff(staff_id),
                 UNIQUE(staff_id, date)
             )
         ''')
-        # Add missing columns if needed
+        # Add columns if missing
         c.execute("PRAGMA table_info(attendance)")
         columns = [col[1] for col in c.fetchall()]
         if 'leave_reason' not in columns:
             c.execute("ALTER TABLE attendance ADD COLUMN leave_reason TEXT")
-        if 'selected_shift' not in columns:
-            c.execute("ALTER TABLE attendance ADD COLUMN selected_shift TEXT")
-
+        if 'shift_code' not in columns:
+            c.execute("ALTER TABLE attendance ADD COLUMN shift_code TEXT")
         c.execute('''
             CREATE TABLE IF NOT EXISTS work_schedule (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -271,7 +271,7 @@ def get_today_attendance(staff_id):
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT clock-in, clock-out, status, leave_reason, selected_shift FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
+        c.execute("SELECT checkin, checkout, status, leave_reason, shift_code FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         conn.close()
         return row
@@ -279,7 +279,7 @@ def get_today_attendance(staff_id):
         write_log_to_file(f"get_today_attendance error: {e}")
         return None
 
-def set_clock-in(staff_id, time_str, selected_shift=None):
+def set_checkin(staff_id, time_str, shift_code=''):
     try:
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
@@ -288,32 +288,32 @@ def set_clock-in(staff_id, time_str, selected_shift=None):
         row = c.fetchone()
         existing_status = row[0] if row else ''
         tags = [t.strip() for t in existing_status.split(',') if t.strip()]
-        if 'Checked In' not in tags:
-            tags.append('Checked In')
-        new_status = ', '.join(tags) if tags else 'Checked In'
+        if 'Clocked In' not in tags:
+            tags.append('Clocked In')
+        new_status = ', '.join(tags) if tags else 'Clocked In'
         c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, clock-in, clock-out, status, leave_reason, selected_shift)
+            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status, leave_reason, shift_code)
             VALUES (?, ?, ?, NULL, ?, ?, ?)
-        ''', (staff_id, today, time_str, new_status, '', selected_shift))
+        ''', (staff_id, today, time_str, new_status, '', shift_code))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        write_log_to_file(f"set_clock-in error: {e}")
+        write_log_to_file(f"set_checkin error: {e}")
         return False
 
-def set_clock-out(staff_id, time_str, leave_reason=''):
+def set_checkout(staff_id, time_str, leave_reason=''):
     try:
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT clock-in, status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
+        c.execute("SELECT checkin, status FROM attendance WHERE staff_id=? AND date=?", (staff_id, today))
         row = c.fetchone()
         if not row:
             conn.close()
             return False
-        clock-in, status = row
-        if not clock-in:
+        checkin, status = row
+        if not checkin:
             conn.close()
             return False
 
@@ -328,7 +328,7 @@ def set_clock-out(staff_id, time_str, leave_reason=''):
         tags = [t.strip() for t in status.split(',') if t.strip()] if status else []
 
         try:
-            ci_dt = datetime.datetime.strptime(clock-in, "%H:%M:%S")
+            ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
             ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
             co_dt = datetime.datetime.strptime(time_str, "%H:%M:%S")
             we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
@@ -339,22 +339,22 @@ def set_clock-out(staff_id, time_str, leave_reason=''):
                 else:
                     co_abs = co_dt
                 we_abs = we_dt + datetime.timedelta(days=1)
-                clock-in_dev = (ci_dt - ws_dt).total_seconds() / 60.0
-                clock-out_dev = (co_abs - we_abs).total_seconds() / 60.0
+                checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
             else:
-                clock-in_dev = (ci_dt - ws_dt).total_seconds() / 60.0
-                clock-out_dev = (co_dt - we_dt).total_seconds() / 60.0
+                checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                checkout_dev = (co_dt - we_dt).total_seconds() / 60.0
 
-            if clock-in_dev > 0:
+            if checkin_dev > 0:
                 tags.append('Late')
-            elif clock-in_dev < 0:
+            elif checkin_dev < 0:
                 tags.append('Early In')
             else:
                 pass
 
-            if clock-out_dev > 0:
+            if checkout_dev > 0:
                 tags.append('Overtime')
-            elif clock-out_dev < 0:
+            elif checkout_dev < 0:
                 tags.append('Early Leave')
             else:
                 pass
@@ -362,7 +362,7 @@ def set_clock-out(staff_id, time_str, leave_reason=''):
             if not any(t in ['Late', 'Early In', 'Overtime', 'Early Leave'] for t in tags):
                 tags.append('Normal')
 
-            tags = [t for t in tags if t != 'Checked In']
+            tags = [t for t in tags if t != 'Clocked In']
             unique_tags = []
             for t in tags:
                 if t not in unique_tags:
@@ -370,44 +370,44 @@ def set_clock-out(staff_id, time_str, leave_reason=''):
             new_status = ', '.join(unique_tags)
 
             c.execute('''
-                UPDATE attendance SET clock-out=?, status=?, leave_reason=?
+                UPDATE attendance SET checkout=?, status=?, leave_reason=?
                 WHERE staff_id=? AND date=?
             ''', (time_str, new_status, leave_reason, staff_id, today))
             conn.commit()
             conn.close()
             return True
         except Exception as e:
-            write_log_to_file(f"set_clock-out deviation error: {e}")
+            write_log_to_file(f"set_checkout deviation error: {e}")
             conn.close()
             return False
     except Exception as e:
-        write_log_to_file(f"set_clock-out error: {e}")
+        write_log_to_file(f"set_checkout error: {e}")
         return False
 
-def override_clock-in(staff_id, time_str):
+def override_checkin(staff_id, time_str, shift_code=''):
     try:
         today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            UPDATE attendance SET clock-in=?, clock-out=NULL, status=?, leave_reason='', selected_shift=''
+            UPDATE attendance SET checkin=?, checkout=NULL, status=?, leave_reason='', shift_code=?
             WHERE staff_id=? AND date=?
-        ''', (time_str, 'Override', staff_id, today))
+        ''', (time_str, 'Override', shift_code, staff_id, today))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        write_log_to_file(f"override_clock-in error: {e}")
+        write_log_to_file(f"override_checkin error: {e}")
         return False
 
-def upsert_attendance(staff_id, date_str, clock-in, clock-out):
+def upsert_attendance(staff_id, date_str, checkin, checkout):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            INSERT OR REPLACE INTO attendance (staff_id, date, clock-in, clock-out, status, leave_reason, selected_shift)
+            INSERT OR REPLACE INTO attendance (staff_id, date, checkin, checkout, status, leave_reason, shift_code)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (staff_id, date_str, clock-in, clock-out, '', '', ''))
+        ''', (staff_id, date_str, checkin, checkout, '', '', ''))
         conn.commit()
         conn.close()
         return True
@@ -457,7 +457,7 @@ def get_monthly_attendance(year, month):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
-            SELECT s.staff_id, s.name, s.batch, a.date, a.clock-in, a.clock-out, a.status, a.leave_reason, a.selected_shift
+            SELECT s.staff_id, s.name, s.batch, a.date, a.checkin, a.checkout, a.status, a.leave_reason, a.shift_code
             FROM attendance a
             JOIN staff s ON a.staff_id = s.staff_id
             WHERE a.date >= ? AND a.date < ?
@@ -470,10 +470,10 @@ def get_monthly_attendance(year, month):
         write_log_to_file(f"get_monthly_attendance error: {e}")
         return []
 
-def calculate_work_hours(clock-in_str, clock-out_str):
+def calculate_work_hours(checkin_str, checkout_str):
     try:
-        ci = datetime.datetime.strptime(clock-in_str, "%H:%M:%S")
-        co = datetime.datetime.strptime(clock-out_str, "%H:%M:%S")
+        ci = datetime.datetime.strptime(checkin_str, "%H:%M:%S")
+        co = datetime.datetime.strptime(checkout_str, "%H:%M:%S")
         if co <= ci:
             co += datetime.timedelta(days=1)
         delta = co - ci
@@ -501,7 +501,7 @@ class AttendanceApp:
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
-                            "Missing check-in/out will be marked in reports.\n"
+                            "Missing clock-in/out will be marked in reports.\n"
                             "Auto backup at 12:00 daily.\n"
                             "Daily activity log stored in backup folder.")
 
@@ -534,8 +534,8 @@ class AttendanceApp:
         btn_frame = ttk.Frame(self.root)
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        # Removed "Import Roster (Excel)" and "Shift Code Reference" buttons
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
+        # Removed Import Roster and Shift Code Reference buttons
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="View Daily Log", command=self.view_daily_log).pack(side=tk.LEFT, padx=5)
@@ -568,19 +568,20 @@ class AttendanceApp:
                 self.batch_var.set(self.current_batch)
                 att = get_today_attendance(staff_id)
                 if att:
-                    clock-in_time = att[0]
-                    clock-out_time = att[1]
+                    checkin_time = att[0]
+                    checkout_time = att[1]
                     status = att[2]
                     leave_reason = att[3]
-                    selected_shift = att[4]
-                    shift_display = f" | Shift: {selected_shift}" if selected_shift else ""
-                    if clock-out_time:
+                    shift_code = att[4]
+                    if checkout_time:
                         reason_display = f" | Leave: {leave_reason}" if leave_reason else ""
-                        self.status_var.set(f"Checked out at {clock-out_time} | Status: {status}{reason_display}{shift_display}")
+                        shift_display = f" | Shift: {shift_code}" if shift_code else ""
+                        self.status_var.set(f"Clocked out at {checkout_time} | Status: {status}{reason_display}{shift_display}")
                     else:
-                        self.status_var.set(f"Checked in at {clock-in_time} | Status: {status}{shift_display}")
+                        shift_display = f" | Shift: {shift_code}" if shift_code else ""
+                        self.status_var.set(f"Clocked in at {checkin_time} | Status: {status}{shift_display}")
                 else:
-                    self.status_var.set("Not checked in today")
+                    self.status_var.set("Not clocked in today")
             else:
                 self.current_name = None
                 self.current_batch = None
@@ -676,21 +677,21 @@ class AttendanceApp:
         att = get_today_attendance(staff_id)
         now = datetime.datetime.now().strftime("%H:%M:%S")
         if att:
-            clock-in_time = att[0]
-            clock-out_time = att[1]
-            if clock-out_time:
-                action = "Check-in (override)"
+            checkin_time = att[0]
+            checkout_time = att[1]
+            if checkout_time:
+                action = "Clock-in (override)"
                 action_key = "override"
             else:
-                action = "Check-out"
-                action_key = "clock-out"
+                action = "Clock-out"
+                action_key = "checkout"
         else:
-            action = "Check-in"
-            action_key = "clock-in"
+            action = "Clock-in"
+            action_key = "checkin"
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog (with conditional shift selection) ----------
+    # ---------- Confirmation Dialog ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
@@ -704,10 +705,11 @@ class AttendanceApp:
         self.scan_btn.config(state=tk.DISABLED)
         self.confirm_dialog = dialog
 
-        if action_key == "clock-in":
-            countdown = None
+        # Countdown only for clock-out/override? No, override is like clock-in, so no countdown. Clock-out has countdown.
+        if action_key == "checkout":
+            countdown = 30
         else:
-            countdown = 10
+            countdown = None
 
         timer_id = None
 
@@ -725,61 +727,68 @@ class AttendanceApp:
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
 
         today = datetime.date.today().isoformat()
-        existing_schedule = get_work_schedule_for_date(staff_id, today)
 
-        # Show current schedule (read-only)
-        if existing_schedule:
-            start, end = existing_schedule
-            code = None
-            for c, times in SHIFT_MAP.items():
-                if times and times[0] == start and times[1] == end:
-                    code = c
-                    break
-            if code:
-                display_text = f"{code}: {start} - {end}"
-            else:
-                display_text = f"{start} - {end}"
-            ttk.Label(dialog, text="Current Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-            ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
-        else:
-            ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
-
-        # ---- Shift Selection (only for clock-in/override, not for clock-out) ----
+        # ---- Shift Selection (only for clock-in and override) ----
         shift_combo = None
-        if action_key in ("clock-in", "override"):
+        if action_key in ("checkin", "override"):
+            # Get current schedule if exists
+            existing_schedule = get_work_schedule_for_date(staff_id, today)
             shift_list = []
             for code, times in SHIFT_MAP.items():
                 if times is not None:
                     start, end = times
                     shift_list.append(f"{code}: {start} - {end}")
 
+            current_code = None
+            if existing_schedule:
+                start, end = existing_schedule
+                for code, times in SHIFT_MAP.items():
+                    if times and times[0] == start and times[1] == end:
+                        current_code = code
+                        break
+
+            ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
             if shift_list:
-                ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=5, column=0, padx=15, pady=8, sticky=tk.W)
                 combo = ttk.Combobox(dialog, values=shift_list, width=40, font=("Arial", 10))
-                combo.grid(row=5, column=1, padx=15, pady=8)
-                # Pre-select existing schedule if any
-                if existing_schedule:
-                    start, end = existing_schedule
-                    for code, times in SHIFT_MAP.items():
-                        if times and times[0] == start and times[1] == end:
-                            default_text = f"{code}: {start} - {end}"
-                            if default_text in shift_list:
-                                combo.set(default_text)
-                            break
+                combo.grid(row=4, column=1, padx=15, pady=8)
+                if current_code:
+                    default_text = f"{current_code}: {existing_schedule[0]} - {existing_schedule[1]}"
+                    if default_text in shift_list:
+                        combo.set(default_text)
                     else:
                         combo.current(0)
                 else:
                     combo.current(0)
                 shift_combo = combo
             else:
-                ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=5, column=0, columnspan=2, padx=15, pady=8)
+                ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
+                self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
+        else:
+            # For clock-out, display current schedule (read-only) and no combo
+            existing_schedule = get_work_schedule_for_date(staff_id, today)
+            if existing_schedule:
+                start, end = existing_schedule
+                code = None
+                for c, times in SHIFT_MAP.items():
+                    if times and times[0] == start and times[1] == end:
+                        code = c
+                        break
+                if code:
+                    display_text = f"{code}: {start} - {end}"
+                else:
+                    display_text = f"{start} - {end}"
+                ttk.Label(dialog, text="Current Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+                ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
+            else:
+                ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
-        # ---- Leave Reason (only for clock-out, not for clock-in/override) ----
+        # ---- Leave Reason (only for clock-out/override? Override is like clock-in, but may also need leave reason? We'll keep for checkout only) ----
         leave_vars = []
         leave_frame = None
-        if action_key == "clock-out":
+        if action_key == "checkout":
             leave_frame = ttk.LabelFrame(dialog, text="Leave Reasons", padding=10)
-            leave_frame.grid(row=6, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
+            # For checkout, we place it after the schedule row (row 5)
+            leave_frame.grid(row=5, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
             reasons = ["CO", "Annual Leave", "Sick Leave", "Other"]
             for i, reason in enumerate(reasons):
                 var = tk.BooleanVar()
@@ -787,15 +796,34 @@ class AttendanceApp:
                 cb.grid(row=i, column=0, padx=5, pady=2, sticky=tk.W)
                 leave_vars.append((reason, var))
 
-        # Countdown (only for clock-out/override)
+        # Countdown label
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
-            countdown_label.grid(row=7, column=0, columnspan=2, pady=15)
+            countdown_label.grid(row=6, column=0, columnspan=2, pady=15)
+        else:
+            # For clock-in, no countdown, but we need to place the countdown label row empty or shift buttons up?
+            # We'll leave a spacer or just place buttons at row 6.
+            pass
 
-        # Buttons
+        # Buttons row
+        btn_row = 6 if countdown is not None else 5  # if no countdown, buttons go to row 5 (since leave_frame might be at row 5)
+        # Actually adjust: if leave_frame exists, it's row 5, countdown row 6, buttons row 7. If no leave_frame and no countdown, buttons row 5.
+        # Let's use dynamic positioning.
+        row_counter = 4  # after staff info
+        # Schedule row
+        row_counter += 1
+        # Leave reason row (if checkout)
+        if leave_frame:
+            row_counter += 1
+        # Countdown row (if any)
+        if countdown is not None:
+            row_counter += 1
+        # Buttons row
+        btn_row = row_counter + 1
+
         btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=8, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=btn_row, column=0, columnspan=2, pady=20)
 
         def reset_after_dialog():
             self.barcode_entry.config(state=tk.NORMAL)
@@ -823,22 +851,22 @@ class AttendanceApp:
             # Main action
             success = False
             try:
-                if action_key == "clock-in":
-                    success = set_clock-in(staff_id, current_time, selected_shift)
+                if action_key == "checkin":
+                    success = set_checkin(staff_id, current_time, selected_shift or '')
                     if success:
-                        self.log_message(f"Checked in at {current_time}")
+                        self.log_message(f"Clocked in at {current_time} | Shift: {selected_shift or 'None'}")
                     else:
                         self.log_message("Failed to record clock-in (database error)")
-                elif action_key == "clock-out":
-                    success = set_clock-out(staff_id, current_time, leave_reason)
+                elif action_key == "checkout":
+                    success = set_checkout(staff_id, current_time, leave_reason)
                     if success:
-                        self.log_message(f"Checked out at {current_time} | Leave Reason: {leave_reason or 'None'}")
+                        self.log_message(f"Clocked out at {current_time} | Leave Reason: {leave_reason or 'None'}")
                     else:
                         self.log_message("Failed to record clock-out (database error)")
                 elif action_key == "override":
-                    success = override_clock-in(staff_id, current_time)
+                    success = override_checkin(staff_id, current_time, selected_shift or '')
                     if success:
-                        self.log_message(f"Overrode check‑in at {current_time} (previous clock-out cleared)")
+                        self.log_message(f"Overrode clock-in at {current_time} (previous checkout cleared) | Shift: {selected_shift or 'None'}")
                     else:
                         self.log_message("Failed to override clock-in (database error)")
                 else:
@@ -1113,7 +1141,7 @@ class AttendanceApp:
                     conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
                     c.execute('''
-                        SELECT date, clock-in, clock-out, status, leave_reason, selected_shift
+                        SELECT date, checkin, checkout, status, leave_reason, shift_code
                         FROM attendance
                         WHERE staff_id=? AND date >= ? AND date < ?
                     ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
@@ -1131,12 +1159,12 @@ class AttendanceApp:
                         work_start, work_end = WORK_START, WORK_END
 
                     if date_str in records:
-                        clock-in, clock-out, status, leave_reason, selected_shift = records[date_str]
+                        checkin, checkout, status, leave_reason, shift_code = records[date_str]
                         if status:
                             status_lower = status.lower()
-                            if 'late' in status_lower or 'early leave' in status_lower or 'forgot' in status_lower or 'no clock-out' in status_lower or 'no clock-in' in status_lower:
+                            if 'late' in status_lower or 'early leave' in status_lower or 'forgot' in status_lower or 'no checkout' in status_lower or 'no checkin' in status_lower:
                                 exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
-                                exceptions[staff_id]['days'].append((date_str, status, f"clock-in: {clock-in}, clock-out: {clock-out}", leave_reason, selected_shift))
+                                exceptions[staff_id]['days'].append((date_str, status, f"Checkin: {checkin}, Checkout: {checkout}", leave_reason, shift_code))
                     else:
                         if schedule:
                             exceptions.setdefault(staff_id, {'name': name, 'batch': batch, 'days': []})
@@ -1148,7 +1176,7 @@ class AttendanceApp:
 
             result_win = tk.Toplevel(win)
             result_win.title(f"Exception Report - {year}-{month:02d}")
-            result_win.geometry("1050x500")
+            result_win.geometry("1000x500")
 
             tree = ttk.Treeview(result_win, columns=("Staff", "Batch", "Date", "Issue", "Detail", "Leave Reason", "Shift Code"), show="headings")
             tree.heading("Staff", text="Staff (ID)")
@@ -1161,7 +1189,7 @@ class AttendanceApp:
             tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
             for staff_id, data in exceptions.items():
-                for date_str, issue, detail, leave_reason, selected_shift in data['days']:
+                for date_str, issue, detail, leave_reason, shift_code in data['days']:
                     tree.insert("", tk.END, values=(
                         f"{data['name']} ({staff_id})",
                         data['batch'] or "-",
@@ -1169,7 +1197,7 @@ class AttendanceApp:
                         issue,
                         detail,
                         leave_reason or "-",
-                        selected_shift or "-"
+                        shift_code or "-"
                     ))
 
             def export_exceptions():
@@ -1182,8 +1210,8 @@ class AttendanceApp:
                         writer = csv.writer(f)
                         writer.writerow(["Staff ID", "Name", "Batch", "Date", "Issue Type", "Detail", "Leave Reason", "Shift Code"])
                         for staff_id, data in exceptions.items():
-                            for date_str, issue, detail, leave_reason, selected_shift in data['days']:
-                                writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue, detail, leave_reason, selected_shift])
+                            for date_str, issue, detail, leave_reason, shift_code in data['days']:
+                                writer.writerow([staff_id, data['name'], data['batch'] or "", date_str, issue, detail, leave_reason, shift_code])
                     messagebox.showinfo("Export", f"Report exported to {file_path}")
                 except Exception as e:
                     messagebox.showerror("Error", f"Export failed: {str(e)}")
@@ -1252,7 +1280,7 @@ class AttendanceApp:
                     conn = sqlite3.connect(DB_PATH)
                     c = conn.cursor()
                     c.execute('''
-                        SELECT date, clock-in, clock-out, status, leave_reason, selected_shift
+                        SELECT date, checkin, checkout, status, leave_reason, shift_code
                         FROM attendance
                         WHERE staff_id=? AND date >= ? AND date < ?
                     ''', (staff_id, first_day.isoformat(), next_month.isoformat()))
@@ -1273,12 +1301,12 @@ class AttendanceApp:
                     work_end = pad_time(work_end)
 
                     if date_str in records:
-                        clock-in, clock-out, status, leave_reason, selected_shift = records[date_str]
-                        if clock-in and clock-out:
-                            work_hrs = calculate_work_hours(clock-in, clock-out)
+                        checkin, checkout, status, leave_reason, shift_code = records[date_str]
+                        if checkin and checkout:
+                            work_hrs = calculate_work_hours(checkin, checkout)
                             try:
-                                ci_dt = datetime.datetime.strptime(clock-in, "%H:%M:%S")
-                                co_dt = datetime.datetime.strptime(clock-out, "%H:%M:%S")
+                                ci_dt = datetime.datetime.strptime(checkin, "%H:%M:%S")
+                                co_dt = datetime.datetime.strptime(checkout, "%H:%M:%S")
                                 ws_dt = datetime.datetime.strptime(work_start, "%H:%M:%S")
                                 we_dt = datetime.datetime.strptime(work_end, "%H:%M:%S")
                                 if we_dt < ws_dt:
@@ -1287,60 +1315,60 @@ class AttendanceApp:
                                     else:
                                         co_abs = co_dt
                                     we_abs = we_dt + datetime.timedelta(days=1)
-                                    clock-in_dev = (ci_dt - ws_dt).total_seconds() / 60.0
-                                    clock-out_dev = (co_abs - we_abs).total_seconds() / 60.0
+                                    checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                                    checkout_dev = (co_abs - we_abs).total_seconds() / 60.0
                                 else:
-                                    clock-in_dev = (ci_dt - ws_dt).total_seconds() / 60.0
-                                    clock-out_dev = (co_dt - we_dt).total_seconds() / 60.0
-                                clock-in_dev = round(clock-in_dev)
-                                clock-out_dev = round(clock-out_dev)
+                                    checkin_dev = (ci_dt - ws_dt).total_seconds() / 60.0
+                                    checkout_dev = (co_dt - we_dt).total_seconds() / 60.0
+                                checkin_dev = round(checkin_dev)
+                                checkout_dev = round(checkout_dev)
                             except:
-                                clock-in_dev = None
-                                clock-out_dev = None
+                                checkin_dev = None
+                                checkout_dev = None
 
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": clock-in,
-                                "clock-out": clock-out,
+                                "Checkin": checkin,
+                                "Checkout": checkout,
                                 "Work Hours": f"{work_hrs:.2f}",
                                 "Status": status or "Normal",
-                                "clock-in Deviation (min)": clock-in_dev if clock-in_dev is not None else "-",
-                                "clock-out Deviation (min)": clock-out_dev if clock-out_dev is not None else "-",
+                                "Checkin Deviation (min)": checkin_dev if checkin_dev is not None else "-",
+                                "Checkout Deviation (min)": checkout_dev if checkout_dev is not None else "-",
                                 "Leave Reason": leave_reason or "",
-                                "Shift Code": selected_shift or "",
+                                "Shift Code": shift_code or "",
                             })
-                        elif clock-in and not clock-out:
+                        elif checkin and not checkout:
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": clock-in,
-                                "clock-out": "",
+                                "Checkin": checkin,
+                                "Checkout": "",
                                 "Work Hours": "0.00",
-                                "Status": status or "No clock-out Record",
-                                "clock-in Deviation (min)": "-",
-                                "clock-out Deviation (min)": "-",
+                                "Status": status or "No Checkout Record",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                                 "Leave Reason": "",
-                                "Shift Code": selected_shift or "",
+                                "Shift Code": shift_code or "",
                             })
-                        elif not clock-in and clock-out:
+                        elif not checkin and checkout:
                             report_data.append({
                                 "Staff ID": staff_id,
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": "",
-                                "clock-out": clock-out,
+                                "Checkin": "",
+                                "Checkout": checkout,
                                 "Work Hours": "0.00",
-                                "Status": status or "No clock-in Record",
-                                "clock-in Deviation (min)": "-",
-                                "clock-out Deviation (min)": "-",
+                                "Status": status or "No Checkin Record",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                                 "Leave Reason": "",
-                                "Shift Code": "",
+                                "Shift Code": shift_code or "",
                             })
                         else:
                             report_data.append({
@@ -1348,12 +1376,12 @@ class AttendanceApp:
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": "",
-                                "clock-out": "",
+                                "Checkin": "",
+                                "Checkout": "",
                                 "Work Hours": "0.00",
                                 "Status": status or "Forgot Check",
-                                "clock-in Deviation (min)": "-",
-                                "clock-out Deviation (min)": "-",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                                 "Leave Reason": "",
                                 "Shift Code": "",
                             })
@@ -1364,12 +1392,12 @@ class AttendanceApp:
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": "",
-                                "clock-out": "",
+                                "Checkin": "",
+                                "Checkout": "",
                                 "Work Hours": "0.00",
                                 "Status": "Forgot Check",
-                                "clock-in Deviation (min)": "-",
-                                "clock-out Deviation (min)": "-",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                                 "Leave Reason": "",
                                 "Shift Code": "",
                             })
@@ -1379,12 +1407,12 @@ class AttendanceApp:
                                 "Name": name,
                                 "Batch": batch or "",
                                 "Date": date_str,
-                                "clock-in": "",
-                                "clock-out": "",
+                                "Checkin": "",
+                                "Checkout": "",
                                 "Work Hours": "0.00",
                                 "Status": "Off Day",
-                                "clock-in Deviation (min)": "-",
-                                "clock-out Deviation (min)": "-",
+                                "Checkin Deviation (min)": "-",
+                                "Checkout Deviation (min)": "-",
                                 "Leave Reason": "",
                                 "Shift Code": "",
                             })
@@ -1403,8 +1431,8 @@ class AttendanceApp:
 
             try:
                 with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
-                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "clock-in", "clock-out",
-                                  "Work Hours", "Status", "clock-in Deviation (min)", "clock-out Deviation (min)",
+                    fieldnames = ["Staff ID", "Name", "Batch", "Date", "Checkin", "Checkout",
+                                  "Work Hours", "Status", "Checkin Deviation (min)", "Checkout Deviation (min)",
                                   "Leave Reason", "Shift Code"]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
