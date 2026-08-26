@@ -1,9 +1,8 @@
 """
-Staff Duty Attendance System v5.3
-- Fixed Shift Code Reference (now displays all shifts).
+Staff Duty Attendance System v5.4
+- Fixed Shift Code Reference (now shows shifts and debug info).
+- Added Export Staff function in Manage Staff window.
 - Enhanced error logging for checkin/checkout.
-- Added exception handling to prevent silent failures.
-- Daily activity log stored in backup folder.
 """
 
 import sqlite3
@@ -68,8 +67,11 @@ REST_CODES = ["O", "AL", "SL", "AM AL/ PM SL", "D/ PM NPL", "AA2/ PM SL"]
 for code in REST_CODES:
     SHIFT_MAP[code] = None
 
-# Print shift count for debugging
-print(f"[INFO] Loaded {len([k for k, v in SHIFT_MAP.items() if v is not None])} shift codes.")
+# Debug: log shift count to file (will be shown in daily log)
+try:
+    write_log_to_file(f"Shift codes loaded: {len([k for k, v in SHIFT_MAP.items() if v is not None])}")
+except:
+    pass
 
 # ---------- Helper Functions ----------
 def pad_time(t):
@@ -245,7 +247,7 @@ def get_staff(staff_id):
         conn.close()
         return row
     except Exception as e:
-        print(f"get_staff error: {e}")
+        write_log_to_file(f"get_staff error: {e}")
         return None
 
 def get_staff_by_name(name):
@@ -257,7 +259,7 @@ def get_staff_by_name(name):
         conn.close()
         return row[0] if row else None
     except Exception as e:
-        print(f"get_staff_by_name error: {e}")
+        write_log_to_file(f"get_staff_by_name error: {e}")
         return None
 
 def get_today_attendance(staff_id):
@@ -270,7 +272,7 @@ def get_today_attendance(staff_id):
         conn.close()
         return row
     except Exception as e:
-        print(f"get_today_attendance error: {e}")
+        write_log_to_file(f"get_today_attendance error: {e}")
         return None
 
 def set_checkin(staff_id, time_str):
@@ -294,7 +296,7 @@ def set_checkin(staff_id, time_str):
         conn.close()
         return True
     except Exception as e:
-        print(f"set_checkin error: {e}")
+        write_log_to_file(f"set_checkin error: {e}")
         return False
 
 def set_checkout(staff_id, time_str):
@@ -372,11 +374,11 @@ def set_checkout(staff_id, time_str):
             conn.close()
             return True
         except Exception as e:
-            print(f"set_checkout deviation error: {e}")
+            write_log_to_file(f"set_checkout deviation error: {e}")
             conn.close()
             return False
     except Exception as e:
-        print(f"set_checkout error: {e}")
+        write_log_to_file(f"set_checkout error: {e}")
         return False
 
 def override_checkin(staff_id, time_str):
@@ -392,7 +394,7 @@ def override_checkin(staff_id, time_str):
         conn.close()
         return True
     except Exception as e:
-        print(f"override_checkin error: {e}")
+        write_log_to_file(f"override_checkin error: {e}")
         return False
 
 def upsert_attendance(staff_id, date_str, checkin, checkout):
@@ -407,7 +409,7 @@ def upsert_attendance(staff_id, date_str, checkin, checkout):
         conn.close()
         return True
     except Exception as e:
-        print(f"upsert_attendance error: {e}")
+        write_log_to_file(f"upsert_attendance error: {e}")
         return False
 
 def upsert_work_schedule(staff_id, start_date, end_date, work_start, work_end):
@@ -422,7 +424,7 @@ def upsert_work_schedule(staff_id, start_date, end_date, work_start, work_end):
         conn.close()
         return True
     except Exception as e:
-        print(f"upsert_work_schedule error: {e}")
+        write_log_to_file(f"upsert_work_schedule error: {e}")
         return False
 
 def get_work_schedule_for_date(staff_id, date_str):
@@ -439,7 +441,7 @@ def get_work_schedule_for_date(staff_id, date_str):
         conn.close()
         return row if row else None
     except Exception as e:
-        print(f"get_work_schedule_for_date error: {e}")
+        write_log_to_file(f"get_work_schedule_for_date error: {e}")
         return None
 
 def get_monthly_attendance(year, month):
@@ -462,7 +464,7 @@ def get_monthly_attendance(year, month):
         conn.close()
         return rows
     except Exception as e:
-        print(f"get_monthly_attendance error: {e}")
+        write_log_to_file(f"get_monthly_attendance error: {e}")
         return []
 
 def calculate_work_hours(checkin_str, checkout_str):
@@ -480,7 +482,7 @@ def calculate_work_hours(checkin_str, checkout_str):
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.3")
+        self.root.title("Staff Attendance System v5.4")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -643,22 +645,29 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference (fixed) ----------
+    # ---------- Shift Code Reference (fixed with debug) ----------
     def show_shift_reference(self):
         win = tk.Toplevel(self.root)
         win.title("Shift Code Reference")
-        win.geometry("550x450")
+        win.geometry("600x450")
 
-        # Display count
+        # Debug: show shift count
         valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
-        count_label = ttk.Label(win, text=f"Total shifts: {len(valid_shifts)}", font=("Arial", 10))
-        count_label.pack(pady=5)
+        count = len(valid_shifts)
 
-        if not valid_shifts:
-            ttk.Label(win, text="No shift codes found! Please check SHIFT_MAP.", font=("Arial", 12), foreground="red").pack(pady=20)
+        # Info label
+        info_label = ttk.Label(win, text=f"Total shifts: {count}", font=("Arial", 10, "bold"))
+        info_label.pack(pady=5)
+
+        if count == 0:
+            ttk.Label(win, text="ERROR: No shift codes found! Please check the code.",
+                      font=("Arial", 12), foreground="red").pack(pady=20)
+            # Also log this
+            self.log_message("Shift Code Reference: No shifts found in SHIFT_MAP")
             ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
             return
 
+        # Treeview
         tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
         tree.heading("Code", text="Shift Code")
         tree.heading("Start", text="Start Time")
@@ -668,6 +677,7 @@ class AttendanceApp:
         for code, start, end in valid_shifts:
             tree.insert("", tk.END, values=(code, start, end))
 
+        # Rest codes
         rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
         if rest_codes:
             ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}",
@@ -1002,7 +1012,7 @@ class AttendanceApp:
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management ----------
+    # ---------- Staff Management (with Export) ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1012,7 +1022,7 @@ class AttendanceApp:
     def _open_manage_staff(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Staff")
-        win.geometry("500x400")
+        win.geometry("550x450")
 
         tree = ttk.Treeview(win, columns=("ID", "Name", "Batch"), show="headings")
         tree.heading("ID", text="Staff ID")
@@ -1100,9 +1110,36 @@ class AttendanceApp:
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to delete staff: {str(e)}")
 
+        def export_staff():
+            """Export all staff to CSV."""
+            try:
+                file_path = filedialog.asksaveasfilename(
+                    defaultextension=".csv",
+                    filetypes=[("CSV files", "*.csv")],
+                    title="Export Staff List"
+                )
+                if not file_path:
+                    return
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("SELECT staff_id, name, batch FROM staff ORDER BY name")
+                rows = c.fetchall()
+                conn.close()
+                if not rows:
+                    messagebox.showinfo("No Data", "No staff records to export.")
+                    return
+                with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Staff ID", "Name", "Batch"])
+                    writer.writerows(rows)
+                messagebox.showinfo("Export Complete", f"Staff list exported to:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Export failed: {str(e)}")
+
         ttk.Button(btn_frame, text="Add", command=add_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Edit", command=edit_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Delete", command=delete_staff).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Export Staff", command=export_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
     # ---------- Add New Staff ----------
