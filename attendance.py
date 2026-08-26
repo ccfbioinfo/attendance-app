@@ -786,7 +786,7 @@ class AttendanceApp:
         leave_vars = []
         leave_frame = None
         if action_key == "checkout":
-            leave_frame = ttk.LabelFrame(dialog, text="Leave Reasons", padding=10)
+            leave_frame = ttk.LabelFrame(dialog, text="Early Leave Reasons", padding=10)
             # For checkout, we place it after the schedule row (row 5)
             leave_frame.grid(row=5, column=0, columnspan=2, padx=15, pady=8, sticky="ew")
             reasons = ["CO", "Annual Leave", "Sick Leave", "Other"]
