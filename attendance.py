@@ -1,8 +1,8 @@
 """
-Staff Duty Attendance System v6.1
-- Fixed night shift cross-day issue.
-- Automatically detects active night shift record when clocking out in early morning.
-- Preserves all other features.
+Staff Duty Attendance System v5.9 (Night Shift Fixed)
+- Import Staff button moved to Add/Edit Staff window.
+- N_Core night shift cross-day checkout support added.
+- All other features preserved.
 """
 
 import sqlite3
@@ -86,18 +86,28 @@ def get_db_path():
 DB_PATH = get_db_path()
 
 def get_backup_dir():
-    primary = r"C:\pg\windows\system"
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    backup_dir = os.path.join(base_dir, 'backup')
     try:
-        os.makedirs(primary, exist_ok=True)
-        return primary
+        os.makedirs(backup_dir, exist_ok=True)
+        test_file = os.path.join(backup_dir, 'test.tmp')
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        return backup_dir
     except:
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
+        if os.name == 'nt':
+            appdata = os.getenv('APPDATA')
+            if not appdata:
+                appdata = os.path.expanduser('~/AppData/Roaming')
+            backup_dir = os.path.join(appdata, 'AttendanceSystem', 'backup')
         else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        fallback = os.path.join(base_dir, 'backup')
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+            backup_dir = os.path.expanduser('~/.local/share/AttendanceSystem/backup')
+        os.makedirs(backup_dir, exist_ok=True)
+        return backup_dir
 
 def get_today_log_path():
     backup_dir = get_backup_dir()
@@ -253,6 +263,19 @@ def get_staff_by_name(name):
         write_log_to_file(f"get_staff_by_name error: {e}")
         return None
 
+def get_attendance_for_date(staff_id, date_str):
+    """Return (checkin, checkout, status, leave_reason, shift_code) for a specific date."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT checkin, checkout, status, leave_reason, shift_code FROM attendance WHERE staff_id=? AND date=?", (staff_id, date_str))
+        row = c.fetchone()
+        conn.close()
+        return row
+    except Exception as e:
+        write_log_to_file(f"get_attendance_for_date error: {e}")
+        return None
+
 def get_today_attendance(staff_id):
     try:
         today = datetime.date.today().isoformat()
@@ -264,18 +287,6 @@ def get_today_attendance(staff_id):
         return row
     except Exception as e:
         write_log_to_file(f"get_today_attendance error: {e}")
-        return None
-
-def get_attendance_for_date(staff_id, date_str):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT checkin, checkout, status, leave_reason, shift_code FROM attendance WHERE staff_id=? AND date=?", (staff_id, date_str))
-        row = c.fetchone()
-        conn.close()
-        return row
-    except Exception as e:
-        write_log_to_file(f"get_attendance_for_date error: {e}")
         return None
 
 def set_checkin(staff_id, time_str, shift_code='', date_str=None):
@@ -386,8 +397,8 @@ def set_checkout(staff_id, time_str, leave_reason='', date_str=None):
         return False
 
 def override_checkin(staff_id, time_str, shift_code=''):
-    today = datetime.date.today().isoformat()
     try:
+        today = datetime.date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''
@@ -482,12 +493,42 @@ def calculate_work_hours(checkin_str, checkout_str):
     except:
         return 0.0
 
+# ---------- Night Shift Detection (added) ----------
+def get_active_night_shift(staff_id):
+    """Return (date_str, checkin_time) if an active night shift exists (checkin after 18:00, no checkout)."""
+    today = datetime.date.today()
+    for offset in [0, 1]:  # check today and yesterday
+        date = today - datetime.timedelta(days=offset)
+        date_str = date.isoformat()
+        row = get_attendance_for_date(staff_id, date_str)
+        if row:
+            checkin, checkout, status, leave_reason, shift_code = row
+            if checkout is None and checkin:
+                # Check shift code or checkin time
+                if shift_code and 'N_' in shift_code.upper():
+                    return date_str, checkin
+                # If shift code not set, heuristic: checkin time >= 18:00
+                try:
+                    ci_time = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
+                    if ci_time >= datetime.time(18, 0) or ci_time < datetime.time(6, 0):
+                        return date_str, checkin
+                except:
+                    pass
+    return None, None
+
+def get_current_time_category():
+    """Return 'night_checkout_window' if current time is 00:00-08:30 else 'normal'."""
+    now = datetime.datetime.now().time()
+    if now >= datetime.time(0, 0) and now < datetime.time(8, 30):
+        return 'night_checkout_window'
+    return 'normal'
+
 # ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v6.1")
-        self.root.geometry("900x700")
+        self.root.title("Staff Attendance System v5.9 (Night Shift Fixed)")
+        self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
         self.current_staff_id = None
@@ -501,10 +542,11 @@ class AttendanceApp:
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
-                            f"Backup directory: {get_backup_dir()}\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
+                            "Missing clock-in/out will be marked in reports.\n"
                             "Auto backup at 12:00 daily.\n"
-                            "Night shift cross-day supported.")
+                            "Daily activity log stored in backup folder.\n"
+                            "Night shift (N_Core) cross-day support enabled.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -572,7 +614,7 @@ class AttendanceApp:
                 att = get_today_attendance(staff_id)
                 if not att or not att[0]:
                     # Check if there is an active night shift from yesterday
-                    night_date, _ = self.get_active_night_shift(staff_id)
+                    night_date, _ = get_active_night_shift(staff_id)
                     if night_date:
                         att = get_attendance_for_date(staff_id, night_date)
                 if att and att[0]:
@@ -581,8 +623,6 @@ class AttendanceApp:
                     status = att[2]
                     leave_reason = att[3]
                     shift_code = att[4]
-                    date_label = "today" if att and att[0] and datetime.date.today().isoformat() == get_attendance_date_from_record(staff_id) else "night shift"
-                    # We won't handle date label complexity here
                     if checkout_time:
                         reason_display = f" | Leave: {leave_reason}" if leave_reason else ""
                         shift_display = f" | Shift: {shift_code}" if shift_code else ""
@@ -605,47 +645,6 @@ class AttendanceApp:
             self.name_var.set("")
             self.batch_var.set("")
             self.status_var.set("Ready")
-
-    def get_attendance_date_from_record(self, staff_id):
-        # Helper to get date of current record (not used in final)
-        pass
-
-    # ---------- Night Shift Detection ----------
-    def get_active_night_shift(self, staff_id):
-        """Return (date_str, checkin_time) for an active night shift record (checkin after 18:00, no checkout)."""
-        today = datetime.date.today()
-        for offset in [0, 1]:  # check today and yesterday
-            date = today - datetime.timedelta(days=offset)
-            date_str = date.isoformat()
-            row = get_attendance_for_date(staff_id, date_str)
-            if row:
-                checkin, checkout, status, leave_reason, shift_code = row
-                if checkout is None and checkin:
-                    # Check if shift_code indicates night shift
-                    if shift_code and any(n in shift_code.upper() for n in ['N_', 'NIGHT']):
-                        # Also check checkin time is after 18:00
-                        try:
-                            ci_time = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
-                            if ci_time >= datetime.time(18, 0) or ci_time < datetime.time(6, 0):
-                                return date_str, checkin
-                        except:
-                            pass
-                    # If shift_code not set, we can also guess by checkin time > 20:00
-                    elif checkin:
-                        try:
-                            ci_time = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
-                            if ci_time >= datetime.time(20, 0):
-                                return date_str, checkin
-                        except:
-                            pass
-        return None, None
-
-    def get_current_time_category(self):
-        """Return 'night_checkout_window' if current time is 00:00-08:30 else 'normal'."""
-        now = datetime.datetime.now().time()
-        if now >= datetime.time(0, 0) and now < datetime.time(8, 30):
-            return 'night_checkout_window'
-        return 'normal'
 
     # ---------- View Daily Log ----------
     def view_daily_log(self):
@@ -858,18 +857,16 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        # Check if current time is in night checkout window
-        time_category = self.get_current_time_category()
+        # Check for active night shift in early morning window
+        time_category = get_current_time_category()
         now = datetime.datetime.now().strftime("%H:%M:%S")
 
-        # Check for active night shift
         if time_category == 'night_checkout_window':
-            night_date, night_checkin = self.get_active_night_shift(staff_id)
+            night_date, night_checkin = get_active_night_shift(staff_id)
             if night_date:
                 # Active night shift found -> offer checkout
                 action = "Clock-out (night shift)"
                 action_key = "night_checkout"
-                # We will pass night_date as extra info
                 self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
                 return
 
@@ -894,7 +891,7 @@ class AttendanceApp:
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time, night_date=None):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("800x600")
+        dialog.geometry("650x550")
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -904,8 +901,7 @@ class AttendanceApp:
         self.scan_btn.config(state=tk.DISABLED)
         self.confirm_dialog = dialog
 
-        # Determine countdown
-        if action_key == "checkout" or action_key == "night_checkout":
+        if action_key in ("checkout", "night_checkout"):
             countdown = 10
         else:
             countdown = None
@@ -925,14 +921,13 @@ class AttendanceApp:
         ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=15, pady=8, sticky=tk.W)
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
 
-        today = datetime.date.today().isoformat()
-        # Determine date for schedule lookup: use night_date if provided, else today
-        record_date = night_date if night_date else today
+        # Determine target date for schedule lookup
+        target_date = night_date if night_date else datetime.date.today().isoformat()
 
-        # Shift Selection (for checkin and override)
+        # Shift Selection (for clock-in and override)
         shift_combo = None
         if action_key in ("checkin", "override"):
-            existing_schedule = get_work_schedule_for_date(staff_id, record_date)
+            existing_schedule = get_work_schedule_for_date(staff_id, target_date)
             shift_list = []
             for code, times in SHIFT_MAP.items():
                 if times is not None:
@@ -964,8 +959,8 @@ class AttendanceApp:
                 ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
                 self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
         else:
-            # For clock-out, display current schedule (use record_date)
-            existing_schedule = get_work_schedule_for_date(staff_id, record_date)
+            # For clock-out, display current schedule (use target_date)
+            existing_schedule = get_work_schedule_for_date(staff_id, target_date)
             if existing_schedule:
                 start, end = existing_schedule
                 code = None
@@ -1020,12 +1015,11 @@ class AttendanceApp:
             return ''
 
         def perform_action(selected_shift=None, leave_reason=''):
-            # Determine which date to operate on
-            target_date = night_date if night_date else today
+            # Determine target date for this action
+            target_date = night_date if night_date else datetime.date.today().isoformat()
 
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
                 start, end = SHIFT_MAP[selected_shift]
-                # Update schedule for target_date
                 if upsert_work_schedule(staff_id, target_date, target_date, start, end):
                     self.log_message(f"Updated shift to {selected_shift} ({start}-{end}) for {target_date}")
                 else:
@@ -1125,7 +1119,7 @@ class AttendanceApp:
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management ----------
+    # ---------- Staff Management (with Import Staff inside) ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1135,7 +1129,7 @@ class AttendanceApp:
     def _open_manage_staff(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Staff")
-        win.geometry("650x450")
+        win.geometry("600x450")
 
         tree = ttk.Treeview(win, columns=("ID", "Name", "Batch"), show="headings")
         tree.heading("ID", text="Staff ID")
@@ -1249,6 +1243,7 @@ class AttendanceApp:
                 messagebox.showerror("Error", f"Export failed: {str(e)}")
 
         def import_staff():
+            """Import staff from CSV (same format as export)."""
             file_path = filedialog.askopenfilename(
                 title="Select staff CSV file",
                 filetypes=[("CSV files", "*.csv")]
@@ -1261,9 +1256,12 @@ class AttendanceApp:
                     reader = csv.reader(f)
                     header = next(reader, None)
                     if header:
+                        # Check if first row looks like header
                         if len(header) >= 3 and (header[0].lower().strip() in ['staff id', 'id']):
+                            # header exists, data starts from next row
                             pass
                         else:
+                            # No header, rewind
                             f.seek(0)
                             reader = csv.reader(f)
                     else:
