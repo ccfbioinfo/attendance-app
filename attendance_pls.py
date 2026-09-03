@@ -1,8 +1,8 @@
 """
-Staff Duty Attendance System v5.9 (Night Shift Fixed)
-- Import Staff button moved to Add/Edit Staff window.
-- N_Core night shift cross-day checkout support added.
-- All other features preserved.
+Staff Duty Attendance System v5.9 (Night Shift Fixed, No Roster/Shift, Closing Log)
+- Removed Import Roster and Shift Code Reference buttons.
+- Night shift detection: check any time, no time window restriction.
+- On closing, saves Recent Activity log.
 """
 
 import sqlite3
@@ -263,7 +263,6 @@ def get_staff_by_name(name):
         return None
 
 def get_attendance_for_date(staff_id, date_str):
-    """Return (checkin, checkout, status, leave_reason, shift_code) for a specific date."""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -492,21 +491,17 @@ def calculate_work_hours(checkin_str, checkout_str):
     except:
         return 0.0
 
-# ---------- Night Shift Detection (added) ----------
+# ---------- Night Shift Detection (modified) ----------
 def get_active_night_shift(staff_id):
-    """Return (date_str, checkin_time) if an active night shift exists (checkin after 18:00, no checkout)."""
+    """Check yesterday and today for active night shift (no checkout, checkin 18:00-23:59 or 00:00-05:59)."""
     today = datetime.date.today()
-    for offset in [0, 1]:  # check today and yesterday
+    for offset in [1, 0]:  # yesterday first, then today
         date = today - datetime.timedelta(days=offset)
         date_str = date.isoformat()
         row = get_attendance_for_date(staff_id, date_str)
         if row:
             checkin, checkout, status, leave_reason, shift_code = row
             if checkout is None and checkin:
-                # Check shift code or checkin time
-                if shift_code and 'N_' in shift_code.upper():
-                    return date_str, checkin
-                # If shift code not set, heuristic: checkin time >= 18:00
                 try:
                     ci_time = datetime.datetime.strptime(checkin, "%H:%M:%S").time()
                     if ci_time >= datetime.time(18, 0) or ci_time < datetime.time(6, 0):
@@ -514,13 +509,6 @@ def get_active_night_shift(staff_id):
                 except:
                     pass
     return None, None
-
-def get_current_time_category():
-    """Return 'night_checkout_window' if current time is 00:00-08:30 else 'normal'."""
-    now = datetime.datetime.now().time()
-    if now >= datetime.time(0, 0) and now < datetime.time(8, 30):
-        return 'night_checkout_window'
-    return 'normal'
 
 # ---------- GUI Application ----------
 class AttendanceApp:
@@ -537,15 +525,15 @@ class AttendanceApp:
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
         schedule_backup()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
-                            "Missing clock-in/out will be marked in reports.\n"
+                            "Night shift detection: any time, checkin 18:00-05:59.\n"
                             "Auto backup at 12:00 daily.\n"
-                            "Daily activity log stored in backup folder.\n"
-                            "Night shift (N_Core) cross-day support enabled.")
+                            "Daily activity log stored in backup folder.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -577,13 +565,11 @@ class AttendanceApp:
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(btn_frame, text="Add / Edit Staff", command=self.manage_staff).pack(side=tk.LEFT, padx=5)
-        #ttk.Button(btn_frame, text="Import Roster (Excel)", command=self.import_roster).pack(side=tk.LEFT, padx=5)
-        #ttk.Button(btn_frame, text="Shift Code Reference", command=self.show_shift_reference).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Monthly Exceptions", command=self.show_monthly_summary).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Full Monthly Report", command=self.export_full_monthly_report).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="View Daily Log", command=self.view_daily_log).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Change Password", command=self.change_password).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Exit", command=self.root.quit).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Exit", command=self.exit_app).pack(side=tk.RIGHT, padx=5)
 
         log_frame = ttk.LabelFrame(self.root, text="Recent Activity", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -609,10 +595,8 @@ class AttendanceApp:
                 self.current_batch = staff[2]
                 self.name_var.set(self.current_name)
                 self.batch_var.set(self.current_batch)
-                # Check today first
                 att = get_today_attendance(staff_id)
                 if not att or not att[0]:
-                    # Check if there is an active night shift from yesterday
                     night_date, _ = get_active_night_shift(staff_id)
                     if night_date:
                         att = get_attendance_for_date(staff_id, night_date)
@@ -644,6 +628,13 @@ class AttendanceApp:
             self.name_var.set("")
             self.batch_var.set("")
             self.status_var.set("Ready")
+
+    def on_closing(self):
+        self.log_message("Application closing...")
+        self.root.destroy()
+
+    def exit_app(self):
+        self.on_closing()
 
     # ---------- View Daily Log ----------
     def view_daily_log(self):
@@ -699,139 +690,7 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Shift Code Reference ----------
-    def show_shift_reference(self):
-        win = tk.Toplevel(self.root)
-        win.title("Shift Code Reference")
-        win.geometry("500x400")
-
-        tree = ttk.Treeview(win, columns=("Code", "Start", "End"), show="headings")
-        tree.heading("Code", text="Shift Code")
-        tree.heading("Start", text="Start Time")
-        tree.heading("End", text="End Time")
-        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        valid_shifts = [(code, start, end) for code, (start, end) in SHIFT_MAP.items() if (start and end)]
-        if not valid_shifts:
-            ttk.Label(win, text="No shift codes found.", font=("Arial", 12), foreground="red").pack(pady=20)
-        else:
-            for code, start, end in valid_shifts:
-                tree.insert("", tk.END, values=(code, start, end))
-
-        rest_codes = [code for code, times in SHIFT_MAP.items() if times is None]
-        if rest_codes:
-            ttk.Label(win, text=f"Rest/Leave codes (no schedule): {', '.join(rest_codes)}",
-                      font=("Arial", 10), foreground="gray").pack(pady=5)
-
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
-
-    # ---------- Import Roster ----------
-    def import_roster(self):
-        if not HAS_OPENPYXL:
-            messagebox.showerror("Error", "openpyxl is required for roster import. Please install: pip install openpyxl")
-            return
-
-        file_path = filedialog.askopenfilename(
-            title="Select roster Excel file",
-            filetypes=[("Excel files", "*.xlsx")]
-        )
-        if not file_path:
-            return
-
-        try:
-            wb = load_workbook(file_path, data_only=True)
-            ws = wb.active
-
-            date_row_idx = None
-            date_cols = []
-            for row_idx in range(1, min(15, ws.max_row + 1)):
-                row_values = [cell.value for cell in ws[row_idx]]
-                found = False
-                for col_idx, val in enumerate(row_values, start=1):
-                    if val and isinstance(val, str):
-                        parsed = self.parse_date(val)
-                        if parsed:
-                            date_cols.append((col_idx, parsed))
-                            found = True
-                if found:
-                    date_row_idx = row_idx
-                    break
-
-            if not date_cols:
-                messagebox.showerror("Error", "No date columns found in the first 15 rows.")
-                return
-
-            date_cols.sort(key=lambda x: x[0])
-            first_date_col = date_cols[0][0]
-            name_col = first_date_col - 1
-            if name_col < 1:
-                messagebox.showerror("Error", "Name column not found (must be before date columns).")
-                return
-
-            self.log_message(f"Detected date row: {date_row_idx}, name column: {name_col}, first date col: {first_date_col}")
-
-            inserted = 0
-            skipped = 0
-            for row_idx in range(date_row_idx + 1, ws.max_row + 1):
-                name_cell = ws.cell(row=row_idx, column=name_col)
-                name = str(name_cell.value).strip() if name_cell.value else None
-                if not name:
-                    continue
-
-                staff_id = get_staff_by_name(name)
-                if not staff_id:
-                    self.log_message(f"Staff '{name}' not found in database, skipping row {row_idx}")
-                    skipped += 1
-                    continue
-
-                for col_idx, date_str in date_cols:
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    shift_code = str(cell.value).strip() if cell.value else ""
-                    if not shift_code:
-                        continue
-                    if shift_code in SHIFT_MAP:
-                        times = SHIFT_MAP[shift_code]
-                        if times is None:
-                            continue
-                        work_start, work_end = times
-                        if upsert_work_schedule(staff_id, date_str, date_str, work_start, work_end):
-                            inserted += 1
-                    else:
-                        self.log_message(f"Unknown shift code '{shift_code}' for {name} on {date_str}")
-
-            self.log_message(f"Roster import completed. Inserted {inserted} schedules, skipped {skipped} staff rows.")
-            messagebox.showinfo("Import Complete", f"Imported {inserted} work schedules from roster.\nSkipped {skipped} rows due to missing staff.")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Roster import failed: {str(e)}")
-
-    def parse_date(self, date_str):
-        s = date_str.strip()
-        match = re.match(r'^(\d{1,2})-(\d{1,2})月$', s)
-        if match:
-            day = int(match.group(1))
-            month = int(match.group(2))
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                try:
-                    dt = datetime.date(CURRENT_YEAR, month, day)
-                    return dt.isoformat()
-                except ValueError:
-                    return None
-        match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', s)
-        if match:
-            day = int(match.group(1))
-            month = int(match.group(2))
-            year_short = int(match.group(3))
-            year = 2000 + year_short if year_short < 100 else year_short
-            if 1 <= month <= 12 and 1 <= day <= 31:
-                try:
-                    dt = datetime.date(year, month, day)
-                    return dt.isoformat()
-                except ValueError:
-                    return None
-        return None
-
-    # ---------- Barcode Scan ----------
+    # ---------- Barcode Scan (modified: no time window) ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -856,20 +715,17 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        # Check for active night shift in early morning window
-        time_category = get_current_time_category()
         now = datetime.datetime.now().strftime("%H:%M:%S")
 
-        if time_category == 'night_checkout_window':
-            night_date, night_checkin = get_active_night_shift(staff_id)
-            if night_date:
-                # Active night shift found -> offer checkout
-                action = "Clock-out (night shift)"
-                action_key = "night_checkout"
-                self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
-                return
+        # 优先检查活跃夜班（无时间限制）
+        night_date, night_checkin = get_active_night_shift(staff_id)
+        if night_date:
+            action = "Clock-out (night shift)"
+            action_key = "night_checkout"
+            self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
+            return
 
-        # Normal processing
+        # 无夜班，正常处理
         att = get_today_attendance(staff_id)
         if att and att[0]:
             checkin_time = att[0]
@@ -907,7 +763,6 @@ class AttendanceApp:
 
         timer_id = None
 
-        # Staff info
         ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
         ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
 
@@ -920,10 +775,8 @@ class AttendanceApp:
         ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=15, pady=8, sticky=tk.W)
         ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
 
-        # Determine target date for schedule lookup
         target_date = night_date if night_date else datetime.date.today().isoformat()
 
-        # Shift Selection (for clock-in and override)
         shift_combo = None
         if action_key in ("checkin", "override"):
             existing_schedule = get_work_schedule_for_date(staff_id, target_date)
@@ -958,7 +811,6 @@ class AttendanceApp:
                 ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
                 self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
         else:
-            # For clock-out, display current schedule (use target_date)
             existing_schedule = get_work_schedule_for_date(staff_id, target_date)
             if existing_schedule:
                 start, end = existing_schedule
@@ -976,7 +828,6 @@ class AttendanceApp:
             else:
                 ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
-        # Leave Reason (only for clock-out)
         leave_vars = []
         leave_frame = None
         if action_key in ("checkout", "night_checkout"):
@@ -989,13 +840,11 @@ class AttendanceApp:
                 cb.grid(row=i, column=0, padx=5, pady=2, sticky=tk.W)
                 leave_vars.append((reason, var))
 
-        # Countdown
         countdown_label = None
         if countdown is not None:
             countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
             countdown_label.grid(row=6, column=0, columnspan=2, pady=15)
 
-        # Buttons
         btn_frame = ttk.Frame(dialog)
         btn_frame.grid(row=7, column=0, columnspan=2, pady=20)
 
@@ -1014,7 +863,6 @@ class AttendanceApp:
             return ''
 
         def perform_action(selected_shift=None, leave_reason=''):
-            # Determine target date for this action
             target_date = night_date if night_date else datetime.date.today().isoformat()
 
             if selected_shift and selected_shift in SHIFT_MAP and SHIFT_MAP[selected_shift] is not None:
@@ -1118,7 +966,7 @@ class AttendanceApp:
 
         dialog.protocol("WM_DELETE_WINDOW", do_cancel)
 
-    # ---------- Staff Management (with Import Staff inside) ----------
+    # ---------- Staff Management ----------
     def manage_staff(self):
         if not verify_password(self.root):
             messagebox.showerror("Error", "Incorrect password.")
@@ -1242,7 +1090,6 @@ class AttendanceApp:
                 messagebox.showerror("Error", f"Export failed: {str(e)}")
 
         def import_staff():
-            """Import staff from CSV (same format as export)."""
             file_path = filedialog.askopenfilename(
                 title="Select staff CSV file",
                 filetypes=[("CSV files", "*.csv")]
@@ -1255,12 +1102,9 @@ class AttendanceApp:
                     reader = csv.reader(f)
                     header = next(reader, None)
                     if header:
-                        # Check if first row looks like header
                         if len(header) >= 3 and (header[0].lower().strip() in ['staff id', 'id']):
-                            # header exists, data starts from next row
                             pass
                         else:
-                            # No header, rewind
                             f.seek(0)
                             reader = csv.reader(f)
                     else:
@@ -1325,7 +1169,7 @@ class AttendanceApp:
         ttk.Button(btn_frame, text="Import Staff", command=import_staff).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.RIGHT, padx=5)
 
-    # ---------- Add New Staff (quick) ----------
+    # ---------- Add New Staff ----------
     def add_new_staff(self, staff_id):
         name = simpledialog.askstring("Add Staff", "Enter staff name:", parent=self.root)
         if name:
