@@ -1,9 +1,8 @@
 """
-Staff Duty Attendance System v5.9 (Night Shift Fixed, Buttons Removed, Closing Log)
+Staff Duty Attendance System v5.9 (Night Shift Fixed, No Roster/Shift, Closing Log)
 - Removed Import Roster and Shift Code Reference buttons.
-- Improved night shift detection (no dependency on shift_code).
-- Night shift checkout window: 00:00 - 08:30.
-- On closing, saves Recent Activity log to backup folder.
+- Night shift detection: check any time, no time window restriction.
+- On closing, saves Recent Activity log.
 """
 
 import sqlite3
@@ -493,10 +492,11 @@ def calculate_work_hours(checkin_str, checkout_str):
     except:
         return 0.0
 
-# ---------- Night Shift Detection ----------
+# ---------- Night Shift Detection (modified) ----------
 def get_active_night_shift(staff_id):
+    """Check yesterday and today for active night shift (no checkout, checkin 18:00-23:59 or 00:00-05:59)."""
     today = datetime.date.today()
-    for offset in [1, 0]:
+    for offset in [1, 0]:  # yesterday first, then today
         date = today - datetime.timedelta(days=offset)
         date_str = date.isoformat()
         row = get_attendance_for_date(staff_id, date_str)
@@ -510,12 +510,6 @@ def get_active_night_shift(staff_id):
                 except:
                     pass
     return None, None
-
-def get_current_time_category():
-    now = datetime.datetime.now().time()
-    if now >= datetime.time(0, 0) and now < datetime.time(8, 30):
-        return 'night_checkout_window'
-    return 'normal'
 
 # ---------- GUI Application ----------
 class AttendanceApp:
@@ -532,18 +526,15 @@ class AttendanceApp:
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
         schedule_backup()
-
-        # ---------- 新增：绑定窗口关闭事件 ----------
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
-                            "Missing clock-in/out will be marked in reports.\n"
+                            "Night shift detection: any time, checkin 18:00-05:59.\n"
                             "Auto backup at 12:00 daily.\n"
-                            "Daily activity log stored in backup folder.\n"
-                            "Night shift detection enabled (18:00-06:00).")
+                            "Daily activity log stored in backup folder.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -639,13 +630,10 @@ class AttendanceApp:
             self.batch_var.set("")
             self.status_var.set("Ready")
 
-    # ---------- 新增：关闭时主动记录日志 ----------
     def on_closing(self):
-        """Called when the window is closed. Saves final log and exits."""
         self.log_message("Application closing...")
         self.root.destroy()
 
-    # 退出按钮调用同样方法
     def exit_app(self):
         self.on_closing()
 
@@ -703,7 +691,7 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Barcode Scan ----------
+    # ---------- Barcode Scan (modified: no time window) ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -728,17 +716,17 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        time_category = get_current_time_category()
         now = datetime.datetime.now().strftime("%H:%M:%S")
 
-        if time_category == 'night_checkout_window':
-            night_date, night_checkin = get_active_night_shift(staff_id)
-            if night_date:
-                action = "Clock-out (night shift)"
-                action_key = "night_checkout"
-                self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
-                return
+        # 优先检查活跃夜班（无时间限制）
+        night_date, night_checkin = get_active_night_shift(staff_id)
+        if night_date:
+            action = "Clock-out (night shift)"
+            action_key = "night_checkout"
+            self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
+            return
 
+        # 无夜班，正常处理
         att = get_today_attendance(staff_id)
         if att and att[0]:
             checkin_time = att[0]
