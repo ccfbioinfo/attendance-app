@@ -1,6 +1,8 @@
 """
-Staff Duty Attendance System v5.9.1 (Night Shift Fixed, Buttons Removed, Closing Log, Enlarged Shift Selection)
-- Enlarged combobox and font for shift selection in confirmation dialog.
+Staff Duty Attendance System v5.9.1 (Night Shift Fixed, No Roster/Shift, Closing Log, Enlarged Shift Selection)
+- Removed Import Roster and Shift Code Reference buttons.
+- Night shift detection: check any time, no time window restriction.
+- On closing, saves Recent Activity log.
 """
 
 import sqlite3
@@ -490,10 +492,11 @@ def calculate_work_hours(checkin_str, checkout_str):
     except:
         return 0.0
 
-# ---------- Night Shift Detection ----------
+# ---------- Night Shift Detection (modified) ----------
 def get_active_night_shift(staff_id):
+    """Check yesterday and today for active night shift (no checkout, checkin 18:00-23:59 or 00:00-05:59)."""
     today = datetime.date.today()
-    for offset in [1, 0]:
+    for offset in [1, 0]:  # yesterday first, then today
         date = today - datetime.timedelta(days=offset)
         date_str = date.isoformat()
         row = get_attendance_for_date(staff_id, date_str)
@@ -508,17 +511,11 @@ def get_active_night_shift(staff_id):
                     pass
     return None, None
 
-def get_current_time_category():
-    now = datetime.datetime.now().time()
-    if now >= datetime.time(0, 0) and now < datetime.time(8, 30):
-        return 'night_checkout_window'
-    return 'normal'
-
 # ---------- GUI Application ----------
 class AttendanceApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Staff Attendance System v5.9.1 (Night Shift Fixed)")
+        self.root.title("Staff Attendance System v5.9 (Night Shift Fixed)")
         self.root.geometry("700x550")
         self.show_db_path()
         self.confirm_dialog = None
@@ -529,17 +526,15 @@ class AttendanceApp:
         self.barcode_entry.bind("<Return>", self.on_barcode_scan)
         self.update_status()
         schedule_backup()
-
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def show_db_path(self):
         messagebox.showinfo("Database Location",
                             f"Attendance records stored at:\n{DB_PATH}\n\n"
                             f"Standard work hours: {STANDARD_HOURS} hrs (exact)\n"
-                            "Missing clock-in/out will be marked in reports.\n"
+                            "Night shift detection: any time, checkin 18:00-05:59.\n"
                             "Auto backup at 12:00 daily.\n"
-                            "Daily activity log stored in backup folder.\n"
-                            "Night shift detection enabled (18:00-06:00).")
+                            "Daily activity log stored in backup folder.")
 
     def create_widgets(self):
         top_frame = ttk.LabelFrame(self.root, text="Scan Barcode", padding=10)
@@ -636,7 +631,6 @@ class AttendanceApp:
             self.status_var.set("Ready")
 
     def on_closing(self):
-        """Called when the window is closed. Saves final log and exits."""
         self.log_message("Application closing...")
         self.root.destroy()
 
@@ -697,7 +691,7 @@ class AttendanceApp:
             else:
                 messagebox.showerror("Error", "Passwords do not match.")
 
-    # ---------- Barcode Scan ----------
+    # ---------- Barcode Scan (modified: no time window) ----------
     def on_barcode_scan(self, event=None):
         if self.confirm_dialog is not None and self.confirm_dialog.winfo_exists():
             self.log_message("Scan ignored – confirmation pending")
@@ -722,17 +716,17 @@ class AttendanceApp:
         self.log_message(f"Scanned: {name} ({staff_id})")
         self.update_status(staff_id)
 
-        time_category = get_current_time_category()
         now = datetime.datetime.now().strftime("%H:%M:%S")
 
-        if time_category == 'night_checkout_window':
-            night_date, night_checkin = get_active_night_shift(staff_id)
-            if night_date:
-                action = "Clock-out (night shift)"
-                action_key = "night_checkout"
-                self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
-                return
+        # 优先检查活跃夜班（无时间限制）
+        night_date, night_checkin = get_active_night_shift(staff_id)
+        if night_date:
+            action = "Clock-out (night shift)"
+            action_key = "night_checkout"
+            self.show_confirmation(staff_id, name, batch, action, action_key, now, night_date=night_date)
+            return
 
+        # 无夜班，正常处理
         att = get_today_attendance(staff_id)
         if att and att[0]:
             checkin_time = att[0]
@@ -749,11 +743,11 @@ class AttendanceApp:
 
         self.show_confirmation(staff_id, name, batch, action, action_key, now)
 
-    # ---------- Confirmation Dialog (Enlarged Shift Selection) ----------
+    # ---------- Confirmation Dialog ----------
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time, night_date=None):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("720x600")          # 放大窗口
+        dialog.geometry("720x600")
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -770,21 +764,17 @@ class AttendanceApp:
 
         timer_id = None
 
-        # 放大标签字体
-        label_font = ("Arial", 13)
-        bold_font = ("Arial", 13, "bold")
+        ttk.Label(dialog, text="Staff:", font=("Arial", 12)).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=f"{name} ({staff_id})", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Staff:", font=label_font).grid(row=0, column=0, padx=15, pady=8, sticky=tk.W)
-        ttk.Label(dialog, text=f"{name} ({staff_id})", font=bold_font).grid(row=0, column=1, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text="Batch:", font=("Arial", 12)).grid(row=1, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=batch or "-", font=("Arial", 12)).grid(row=1, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Batch:", font=label_font).grid(row=1, column=0, padx=15, pady=8, sticky=tk.W)
-        ttk.Label(dialog, text=batch or "-", font=label_font).grid(row=1, column=1, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text="Current time:", font=("Arial", 12)).grid(row=2, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=current_time, font=("Arial", 12, "bold")).grid(row=2, column=1, padx=15, pady=8, sticky=tk.W)
 
-        ttk.Label(dialog, text="Current time:", font=label_font).grid(row=2, column=0, padx=15, pady=8, sticky=tk.W)
-        ttk.Label(dialog, text=current_time, font=bold_font).grid(row=2, column=1, padx=15, pady=8, sticky=tk.W)
-
-        ttk.Label(dialog, text="Action:", font=label_font).grid(row=3, column=0, padx=15, pady=8, sticky=tk.W)
-        ttk.Label(dialog, text=action, font=bold_font, foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text="Action:", font=("Arial", 12)).grid(row=3, column=0, padx=15, pady=8, sticky=tk.W)
+        ttk.Label(dialog, text=action, font=("Arial", 12, "bold"), foreground="blue").grid(row=3, column=1, padx=15, pady=8, sticky=tk.W)
 
         target_date = night_date if night_date else datetime.date.today().isoformat()
 
@@ -805,9 +795,8 @@ class AttendanceApp:
                         current_code = code
                         break
 
-            ttk.Label(dialog, text="Select Shift:", font=label_font).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+            ttk.Label(dialog, text="Select Shift:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
             if shift_list:
-                # ---------- 放大下拉框 ----------
                 combo = ttk.Combobox(dialog, values=shift_list, width=50, font=("Arial", 12, "bold"))
                 combo.grid(row=4, column=1, padx=15, pady=8)
                 if current_code:
@@ -820,7 +809,7 @@ class AttendanceApp:
                     combo.current(0)
                 shift_combo = combo
             else:
-                ttk.Label(dialog, text="No shifts defined (using default hours).", font=label_font, foreground="red").grid(row=4, column=1, padx=15, pady=8)
+                ttk.Label(dialog, text="No shifts defined (using default hours).", font=("Arial", 12), foreground="red").grid(row=4, column=1, padx=15, pady=8)
                 self.log_message("Warning: No shifts in SHIFT_MAP, using default hours.")
         else:
             existing_schedule = get_work_schedule_for_date(staff_id, target_date)
@@ -835,10 +824,10 @@ class AttendanceApp:
                     display_text = f"{code}: {start} - {end}"
                 else:
                     display_text = f"{start} - {end}"
-                ttk.Label(dialog, text="Current Schedule:", font=label_font).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
-                ttk.Label(dialog, text=display_text, font=bold_font, foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
+                ttk.Label(dialog, text="Current Schedule:", font=("Arial", 12)).grid(row=4, column=0, padx=15, pady=8, sticky=tk.W)
+                ttk.Label(dialog, text=display_text, font=("Arial", 12, "bold"), foreground="green").grid(row=4, column=1, padx=15, pady=8, sticky=tk.W)
             else:
-                ttk.Label(dialog, text="No schedule set.", font=label_font, foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
+                ttk.Label(dialog, text="No schedule set.", font=("Arial", 12), foreground="orange").grid(row=4, column=0, columnspan=2, padx=15, pady=8, sticky=tk.W)
 
         leave_vars = []
         leave_frame = None
@@ -854,7 +843,7 @@ class AttendanceApp:
 
         countdown_label = None
         if countdown is not None:
-            countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 12))
+            countdown_label = ttk.Label(dialog, text=f"Auto‑confirm in {countdown} seconds", font=("Arial", 11))
             countdown_label.grid(row=6, column=0, columnspan=2, pady=15)
 
         btn_frame = ttk.Frame(dialog)
