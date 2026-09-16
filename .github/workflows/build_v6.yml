@@ -1,4 +1,4 @@
-name: Build Windows EXE v6
+name: Build Windows EXE v5.9.2
 
 on:
   push:
@@ -26,10 +26,10 @@ jobs:
       - name: Build EXE
         run: |
           #pyinstaller --onefile --windowed attendance.py
-          pyinstaller --onefile --windowed --hidden-import=openpyxl attendance_v6.py
+          pyinstaller --onefile --windowed --hidden-import=openpyxl attendance_v5.9.2.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: attendance-exe_v6
-          path: dist/attendance_v6.exe
+          name: attendance-exe_v5.9.2
+          path: dist/attendance_v5.9.2.exe
