@@ -672,7 +672,7 @@ class AttendanceApp:
         btn_frame.pack(pady=5)
         ttk.Button(btn_frame, text="Open Log Folder",
                    command=lambda: os.startfile(os.path.dirname(log_path)) if os.name == 'nt' else \
-                       messagebox.showinfo("Info", f"Log folder: {os.path.dirname(log_path)}")).pack(side=tk.LEFT, padx=5)
+                       #messagebox.showinfo("Info", f"Log folder: {os.path.dirname(log_path)}")).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
     # ---------- Password Management ----------
@@ -747,7 +747,7 @@ class AttendanceApp:
     def show_confirmation(self, staff_id, name, batch, action, action_key, current_time, night_date=None):
         dialog = tk.Toplevel(self.root)
         dialog.title("Confirm Attendance")
-        dialog.geometry("720x600")
+        dialog.geometry("900x720")
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
