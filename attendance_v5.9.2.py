@@ -631,7 +631,7 @@ class AttendanceApp:
 
         self.log_message("Application started.")
         self.log_message(f"Database: {DB_PATH}")
-        self.log_message(f"Backup dir: {get_backup_dir()}")
+        #self.log_message(f"Backup dir: {get_backup_dir()}")
 
     def log_message(self, msg):
         try:
